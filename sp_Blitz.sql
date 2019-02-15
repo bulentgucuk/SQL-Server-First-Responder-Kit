@@ -309,48 +309,58 @@ AS
 		   AND LEFT(CAST(SERVERPROPERTY('MachineName') AS VARCHAR(8000)), 8) = 'EC2AMAZ-'
 		   AND LEFT(CAST(SERVERPROPERTY('ServerName') AS VARCHAR(8000)), 8) = 'EC2AMAZ-'
 		   AND db_id('rdsadmin') IS NOT NULL
-		   AND EXISTS(SELECT * FROM master.sys.all_objects WHERE name IN ('rds_startup_tasks', 'rds_help_revlogin', 'rds_hexadecimal', 'rds_failover_tracking', 'rds_database_tracking', 'rds_track_change'))
+		   AND SERVERPROPERTY('EngineEdition') NOT IN (5, 6, 8) /* Azure */
 			BEGIN
-						INSERT INTO #SkipChecks (CheckID) VALUES (6);
-						INSERT INTO #SkipChecks (CheckID) VALUES (29);
-						INSERT INTO #SkipChecks (CheckID) VALUES (30);
-						INSERT INTO #SkipChecks (CheckID) VALUES (31);
-						INSERT INTO #SkipChecks (CheckID) VALUES (40); /* TempDB only has one data file */
-						INSERT INTO #SkipChecks (CheckID) VALUES (57);
-						INSERT INTO #SkipChecks (CheckID) VALUES (59);
-						INSERT INTO #SkipChecks (CheckID) VALUES (61);
-						INSERT INTO #SkipChecks (CheckID) VALUES (62);
-						INSERT INTO #SkipChecks (CheckID) VALUES (68);
-						INSERT INTO #SkipChecks (CheckID) VALUES (69);
-						INSERT INTO #SkipChecks (CheckID) VALUES (73);
-						INSERT INTO #SkipChecks (CheckID) VALUES (79);
-						INSERT INTO #SkipChecks (CheckID) VALUES (92);
-						INSERT INTO #SkipChecks (CheckID) VALUES (94);
-						INSERT INTO #SkipChecks (CheckID) VALUES (96);
-						INSERT INTO #SkipChecks (CheckID) VALUES (98);
-						INSERT INTO #SkipChecks (CheckID) VALUES (100); /* Remote DAC disabled */
-						INSERT INTO #SkipChecks (CheckID) VALUES (123);
-						INSERT INTO #SkipChecks (CheckID) VALUES (177);
-						INSERT INTO #SkipChecks (CheckID) VALUES (180); /* 180/181 are maintenance plans */
-						INSERT INTO #SkipChecks (CheckID) VALUES (181);
-						INSERT INTO #SkipChecks (CheckID) VALUES (184); /* xp_readerrorlog checking for IFI */
-						INSERT INTO #SkipChecks (CheckID) VALUES (211); /* xp_regread checking for power saving */
-						INSERT INTO #SkipChecks (CheckID) VALUES (212); /* xp_regread */
-						INSERT INTO #SkipChecks (CheckID) VALUES (219);
-			            INSERT  INTO #BlitzResults
-			            ( CheckID ,
-				            Priority ,
-				            FindingsGroup ,
-				            Finding ,
-				            URL ,
-				            Details
-			            )
-			            SELECT 223 AS CheckID ,
-					            0 AS Priority ,
-					            'Informational' AS FindingsGroup ,
-					            'Some Checks Skipped' AS Finding ,
-					            'https://aws.amazon.com/rds/sqlserver/' AS URL ,
-					            'Amazon RDS detected, so we skipped some checks that are not currently possible, relevant, or practical there.' AS Details;
+						/* Double-check for RDS objects. Has to be in dynamic SQL because Azure SQL DB won't let this proc
+						   compile if it refers to master.sys.all_objects directly. More info: 
+						   https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/issues/1970
+						*/
+						CREATE TABLE #IsAmazonRDS(Yes BIT);
+						SET @StringToExecute = 'IF EXISTS(SELECT * FROM master.sys.all_objects WHERE name IN (''rds_startup_tasks'', ''rds_help_revlogin'', ''rds_hexadecimal'', ''rds_failover_tracking'', ''rds_database_tracking'', ''rds_track_change'')) INSERT INTO #IsAmazonRDS(Yes) VALUES (1);';
+						EXEC(@StringToExecute);
+						IF EXISTS(SELECT * FROM #IsAmazonRDS)
+						BEGIN
+							INSERT INTO #SkipChecks (CheckID) VALUES (6);
+							INSERT INTO #SkipChecks (CheckID) VALUES (29);
+							INSERT INTO #SkipChecks (CheckID) VALUES (30);
+							INSERT INTO #SkipChecks (CheckID) VALUES (31);
+							INSERT INTO #SkipChecks (CheckID) VALUES (40); /* TempDB only has one data file */
+							INSERT INTO #SkipChecks (CheckID) VALUES (57);
+							INSERT INTO #SkipChecks (CheckID) VALUES (59);
+							INSERT INTO #SkipChecks (CheckID) VALUES (61);
+							INSERT INTO #SkipChecks (CheckID) VALUES (62);
+							INSERT INTO #SkipChecks (CheckID) VALUES (68);
+							INSERT INTO #SkipChecks (CheckID) VALUES (69);
+							INSERT INTO #SkipChecks (CheckID) VALUES (73);
+							INSERT INTO #SkipChecks (CheckID) VALUES (79);
+							INSERT INTO #SkipChecks (CheckID) VALUES (92);
+							INSERT INTO #SkipChecks (CheckID) VALUES (94);
+							INSERT INTO #SkipChecks (CheckID) VALUES (96);
+							INSERT INTO #SkipChecks (CheckID) VALUES (98);
+							INSERT INTO #SkipChecks (CheckID) VALUES (100); /* Remote DAC disabled */
+							INSERT INTO #SkipChecks (CheckID) VALUES (123);
+							INSERT INTO #SkipChecks (CheckID) VALUES (177);
+							INSERT INTO #SkipChecks (CheckID) VALUES (180); /* 180/181 are maintenance plans */
+							INSERT INTO #SkipChecks (CheckID) VALUES (181);
+							INSERT INTO #SkipChecks (CheckID) VALUES (184); /* xp_readerrorlog checking for IFI */
+							INSERT INTO #SkipChecks (CheckID) VALUES (211); /* xp_regread checking for power saving */
+							INSERT INTO #SkipChecks (CheckID) VALUES (212); /* xp_regread */
+							INSERT INTO #SkipChecks (CheckID) VALUES (219);
+							INSERT  INTO #BlitzResults
+							( CheckID ,
+								Priority ,
+								FindingsGroup ,
+								Finding ,
+								URL ,
+								Details
+							)
+							SELECT 223 AS CheckID ,
+									0 AS Priority ,
+									'Informational' AS FindingsGroup ,
+									'Some Checks Skipped' AS Finding ,
+									'https://aws.amazon.com/rds/sqlserver/' AS URL ,
+									'Amazon RDS detected, so we skipped some checks that are not currently possible, relevant, or practical there.' AS Details;
+						END
 			END; /* Amazon RDS skipped checks */
 
 		/* If the server is ExpressEdition, skip checks that it doesn't allow */
@@ -771,7 +781,7 @@ AS
 					BEGIN
 
 						/*
-						Below, we check master.sys.databases looking for databases
+						Below, we check sys.databases looking for databases
 						that haven't had a backup in the last week. If we find any,
 						we insert them into #BlitzResults, the temp table that
 						tracks our server's problems. Note that if the check does
@@ -800,7 +810,7 @@ AS
 										    'https://BrentOzar.com/go/nobak' AS URL ,
 										    'Last backed up: '
 										    + COALESCE(CAST(MAX(b.backup_finish_date) AS VARCHAR(25)),'never') AS Details
-								    FROM    master.sys.databases d
+								    FROM    sys.databases d
 										    LEFT OUTER JOIN msdb.dbo.backupset b ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = b.database_name COLLATE SQL_Latin1_General_CP1_CI_AS
 																      AND b.type = 'D'
 																      AND b.server_name = SERVERPROPERTY('ServerName') /*Backupset ran on current server  */
@@ -840,7 +850,7 @@ AS
 										    'https://BrentOzar.com/go/nobak' AS URL ,
 										    'Last backed up: '
 										    + COALESCE(CAST(MAX(b.backup_finish_date) AS VARCHAR(25)),'never') AS Details
-								    FROM    master.sys.databases d
+								    FROM    sys.databases d
 										    LEFT OUTER JOIN msdb.dbo.backupset b ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = b.database_name COLLATE SQL_Latin1_General_CP1_CI_AS
 																      AND b.type = 'D'
 								    WHERE   d.database_id <> 2  /* Bonus points if you know what that means */
@@ -904,7 +914,7 @@ AS
 										'Full Recovery Model w/o Log Backups' AS Finding ,
 										'https://BrentOzar.com/go/biglogs' AS URL ,
 										( 'The ' + CAST(CAST((SELECT ((SUM([mf].[size]) * 8.) / 1024.) FROM sys.[master_files] AS [mf] WHERE [mf].[database_id] = d.[database_id] AND [mf].[type_desc] = 'LOG') AS DECIMAL(18,2)) AS VARCHAR(30)) + 'MB log file has not been backed up in the last week.' ) AS Details
-								FROM    master.sys.databases d
+								FROM    sys.databases d
 								WHERE   d.recovery_model IN ( 1, 2 )
 										AND d.database_id NOT IN ( 2, 3 )
 										AND d.source_database_id IS NULL
@@ -2386,7 +2396,7 @@ AS
 			FROM sys.databases as db2
 			WHERE db2.[state] = 1
 			) ) as rp
-		  INNER JOIN master.sys.databases db ON rp.database_id = db.database_id
+		  INNER JOIN sys.databases db ON rp.database_id = db.database_id
 		  WHERE   rp.modification_time >= DATEADD(dd, -30, GETDATE())  OPTION (RECOMPILE);';
 
 								IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;
@@ -2424,7 +2434,7 @@ AS
 		  ''https://BrentOzar.com/go/repair'' AS URL ,
 		  ( ''Availability Groups has automatically repaired at least one corrupt page in the last 30 days. For more information, query the DMV sys.dm_hadr_auto_page_repair.'' ) AS Details
 		  FROM    sys.dm_hadr_auto_page_repair rp
-		  INNER JOIN master.sys.databases db ON rp.database_id = db.database_id
+		  INNER JOIN sys.databases db ON rp.database_id = db.database_id
 		  WHERE   rp.modification_time >= DATEADD(dd, -30, GETDATE()) OPTION (RECOMPILE) ;';
 								
 								IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;
@@ -2462,7 +2472,7 @@ AS
 		  ''https://BrentOzar.com/go/repair'' AS URL ,
 		  ( ''SQL Server has detected at least one corrupt page in the last 30 days. For more information, query the system table msdb.dbo.suspect_pages.'' ) AS Details
 		  FROM    msdb.dbo.suspect_pages sp
-		  INNER JOIN master.sys.databases db ON sp.database_id = db.database_id
+		  INNER JOIN sys.databases db ON sp.database_id = db.database_id
 		  WHERE   sp.last_update_date >= DATEADD(dd, -30, GETDATE())  OPTION (RECOMPILE);';
 
 								IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;
@@ -3076,7 +3086,7 @@ AS
 					IF NOT EXISTS ( SELECT  1
 									FROM    #SkipChecks
 									WHERE   DatabaseName IS NULL AND CheckID = 110 )
-								AND EXISTS (SELECT * FROM master.sys.all_objects WHERE name = 'dm_os_memory_nodes')
+								AND EXISTS (SELECT * FROM sys.all_objects WHERE name = 'dm_os_memory_nodes')
 						BEGIN
 
 							IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 110) WITH NOWAIT;
@@ -3259,7 +3269,7 @@ AS
 						IF NOT EXISTS ( SELECT  1
 										FROM    #SkipChecks
 										WHERE   DatabaseName IS NULL AND CheckID = 112 )
-									AND EXISTS (SELECT * FROM master.sys.all_objects WHERE name = 'change_tracking_databases')
+									AND EXISTS (SELECT * FROM sys.all_objects WHERE name = 'change_tracking_databases')
 							BEGIN
 
 								IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 112) WITH NOWAIT;
@@ -3321,7 +3331,7 @@ AS
 						IF NOT EXISTS ( SELECT  1
 										FROM    #SkipChecks
 										WHERE   DatabaseName IS NULL AND CheckID = 117 )
-									AND EXISTS (SELECT * FROM master.sys.all_objects WHERE name = 'dm_exec_query_resource_semaphores')
+									AND EXISTS (SELECT * FROM sys.all_objects WHERE name = 'dm_exec_query_resource_semaphores')
 							BEGIN
 								
 								IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 117) WITH NOWAIT;
@@ -5741,7 +5751,7 @@ IF @ProductVersionMajor >= 10
                                     INSERT INTO #Recompile
                                     SELECT DISTINCT DBName = DB_Name(), SPName = SO.name, SM.is_recompiled, ISR.SPECIFIC_SCHEMA
                                     FROM sys.sql_modules AS SM
-                                    LEFT OUTER JOIN master.sys.databases AS sDB ON SM.object_id = DB_id()
+                                    LEFT OUTER JOIN sys.databases AS sDB ON SM.object_id = DB_id()
                                     LEFT OUTER JOIN dbo.sysobjects AS SO ON SM.object_id = SO.id and type = ''P''
                                     LEFT OUTER JOIN INFORMATION_SCHEMA.ROUTINES AS ISR on ISR.Routine_Name = SO.name AND ISR.SPECIFIC_CATALOG = DB_Name()
                                     WHERE SM.is_recompiled=1  OPTION (RECOMPILE); /* oh the rich irony of recompile here */
@@ -5971,7 +5981,7 @@ IF @ProductVersionMajor >= 10
 			                                    ,''https://BrentOzar.com/go/vlf''
 			                                    ,''The ['' + DB_NAME() + ''] database has '' +  CAST(COUNT(*) as VARCHAR(20)) + '' virtual log files (VLFs). This may be slowing down startup, restores, and even inserts/updates/deletes.''
 			                                    FROM #LogInfo2012
-			                                    WHERE EXISTS (SELECT name FROM master.sys.databases
+			                                    WHERE EXISTS (SELECT name FROM sys.databases
 					                                    WHERE source_database_id is null)  OPTION (RECOMPILE);
 		                                      END
 		                                    TRUNCATE TABLE #LogInfo2012;';
@@ -6004,7 +6014,7 @@ IF @ProductVersionMajor >= 10
 			                                    ,''https://BrentOzar.com/go/vlf''
 			                                    ,''The ['' + DB_NAME() + ''] database has '' +  CAST(COUNT(*) as VARCHAR(20)) + '' virtual log files (VLFs). This may be slowing down startup, restores, and even inserts/updates/deletes.''
 			                                    FROM #LogInfo
-			                                    WHERE EXISTS (SELECT name FROM master.sys.databases
+			                                    WHERE EXISTS (SELECT name FROM sys.databases
 			                                    WHERE source_database_id is null) OPTION (RECOMPILE);
 		                                      END
 		                                      TRUNCATE TABLE #LogInfo;';
