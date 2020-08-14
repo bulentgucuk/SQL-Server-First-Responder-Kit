@@ -26,6 +26,7 @@ ALTER PROCEDURE [dbo].[sp_Blitz]
     @SummaryMode TINYINT = 0 ,
     @BringThePain TINYINT = 0 ,
     @UsualDBOwner sysname = NULL ,
+	@SkipBlockingChecks TINYINT = 1 ,
     @Debug TINYINT = 0 ,
     @Version     VARCHAR(30) = NULL OUTPUT,
 	@VersionDate DATETIME = NULL OUTPUT,
@@ -35,11 +36,8 @@ AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	
-	SET @Version = '7.3';
-	SET @VersionDate = '20190219';
-	DECLARE @Version VARCHAR(30);
-	SET @Version = '7.2';
-	SET @VersionDate = '20190128';
+
+	SELECT @Version = '7.98', @VersionDate = '20200808';
 	SET @OutputType = UPPER(@OutputType);
 
     IF(@VersionCheckMode = 1)
@@ -81,7 +79,7 @@ AS
 	@CheckProcedureCache		1=top 20-50 resource-intensive cache plans and analyze them for common performance issues.
 	@OutputProcedureCache		1=output the top 20-50 resource-intensive plans even if they did not trigger an alarm
 	@CheckProcedureCacheFilter	''CPU'' | ''Reads'' | ''Duration'' | ''ExecCount''
-	@OutputType					''TABLE''=table | ''COUNT''=row with number found | ''MARKDOWN''=bulleted list | ''SCHEMA''=version and field list | ''NONE'' = none
+	@OutputType					''TABLE''=table | ''COUNT''=row with number found | ''MARKDOWN''=bulleted list | ''SCHEMA''=version and field list | ''XML'' =table output as XML | ''NONE'' = none
 	@IgnorePrioritiesBelow		50=ignore priorities below 50
 	@IgnorePrioritiesAbove		50=ignore priorities above 50
 	For the rest of the parameters, see https://www.BrentOzar.com/blitz/documentation for details.
@@ -92,9 +90,9 @@ AS
 	tigertoolbox and are provided under the MIT license:
 	https://github.com/Microsoft/tigertoolbox
 	
-	All other copyright for sp_Blitz are held by Brent Ozar Unlimited, 2019.
+	All other copyrights for sp_Blitz are held by Brent Ozar Unlimited, 2020.
 
-	Copyright (c) 2019 Brent Ozar Unlimited
+	Copyright (c) 2020 Brent Ozar Unlimited
 
 	Permission is hereby granted, free of charge, to any person obtaining a copy
 	of this software and associated documentation files (the "Software"), to deal
@@ -119,8 +117,8 @@ AS
 	BEGIN
 		SELECT FieldList = '[Priority] TINYINT, [FindingsGroup] VARCHAR(50), [Finding] VARCHAR(200), [DatabaseName] NVARCHAR(128), [URL] VARCHAR(200), [Details] NVARCHAR(4000), [QueryPlan] NVARCHAR(MAX), [QueryPlanFiltered] NVARCHAR(MAX), [CheckID] INT';
 
-	END;
-	ELSE /* IF @OutputType = 'SCHEMA' */
+	END;/* IF @OutputType = 'SCHEMA' */
+	ELSE 
 	BEGIN
 
 		DECLARE @StringToExecute NVARCHAR(4000)
@@ -153,7 +151,39 @@ AS
 			,@TraceFileIssue bit
 			-- Flag for Windows OS to help with Linux support
 			,@IsWindowsOperatingSystem BIT
-			,@DaysUptime NUMERIC(23,2);
+			,@DaysUptime NUMERIC(23,2)
+            /* For First Responder Kit consistency check:*/
+            ,@spBlitzFullName                VARCHAR(1024)
+            ,@BlitzIsOutdatedComparedToOthers BIT
+            ,@tsql                           NVARCHAR(MAX)
+            ,@VersionCheckModeExistsTSQL     NVARCHAR(MAX)
+            ,@BlitzProcDbName                VARCHAR(256)
+            ,@ExecRet                        INT
+            ,@InnerExecRet                   INT
+            ,@TmpCnt                         INT
+            ,@PreviousComponentName          VARCHAR(256)
+            ,@PreviousComponentFullPath      VARCHAR(1024)
+            ,@CurrentStatementId             INT
+            ,@CurrentComponentSchema         VARCHAR(256)
+            ,@CurrentComponentName           VARCHAR(256)
+            ,@CurrentComponentType           VARCHAR(256)
+            ,@CurrentComponentVersionDate    DATETIME2
+            ,@CurrentComponentFullName       VARCHAR(1024)
+            ,@CurrentComponentMandatory      BIT
+            ,@MaximumVersionDate             DATETIME
+            ,@StatementCheckName             VARCHAR(256)
+            ,@StatementOutputsCounter        BIT
+            ,@OutputCounterExpectedValue     INT
+            ,@StatementOutputsExecRet        BIT
+            ,@StatementOutputsDateTime       BIT
+            ,@CurrentComponentMandatoryCheckOK       BIT
+            ,@CurrentComponentVersionCheckModeOK     BIT
+            ,@canExitLoop                            BIT
+            ,@frkIsConsistent                        BIT
+			,@NeedToTurnNumericRoundabortBackOn      BIT;
+            
+            /* End of declarations for First Responder Kit consistency check:*/
+        ;
 
 		SET @crlf = NCHAR(13) + NCHAR(10);
 		SET @ResultText = 'sp_Blitz Results: ' + @crlf;
@@ -165,7 +195,25 @@ AS
 		
 		IF @DaysUptime = 0
 		    SET @DaysUptime = .01;
-		
+
+		/* 
+		Set the session state of Numeric_RoundAbort to off if any databases have Numeric Round-Abort enabled.  
+		Stops arithmetic overflow errors during data conversion. See Github issue #2302 for more info.
+		*/
+		IF ( (8192 & @@OPTIONS) = 8192 ) /* Numeric RoundAbort is currently on, so we may need to turn it off temporarily */
+			BEGIN
+			IF EXISTS (SELECT 1 
+							FROM sys.databases
+							WHERE is_numeric_roundabort_on = 1) /* A database has it turned on */
+				BEGIN
+				SET @NeedToTurnNumericRoundabortBackOn = 1;
+				SET NUMERIC_ROUNDABORT OFF;
+				END;
+			END;
+	
+
+
+
 		/*
 		--TOURSTOP01--
 		See https://www.BrentOzar.com/go/blitztour for a guided tour.
@@ -204,6 +252,47 @@ AS
 			  Finding NVARCHAR(128)
 			);
 
+        /* First Responder Kit consistency (temporary tables) */
+        
+        IF(OBJECT_ID('tempdb..#FRKObjects') IS NOT NULL)
+        BEGIN
+            EXEC sp_executesql N'DROP TABLE #FRKObjects;';
+        END;    
+
+        -- this one represents FRK objects
+        CREATE TABLE #FRKObjects (
+            DatabaseName                VARCHAR(256)    NOT NULL,
+            ObjectSchemaName            VARCHAR(256)    NULL,
+            ObjectName                  VARCHAR(256)    NOT NULL,
+            ObjectType                  VARCHAR(256)    NOT NULL,
+            MandatoryComponent          BIT             NOT NULL
+        );
+        
+        
+        IF(OBJECT_ID('tempdb..#StatementsToRun4FRKVersionCheck') IS NOT NULL)
+        BEGIN
+            EXEC sp_executesql N'DROP TABLE #StatementsToRun4FRKVersionCheck;';
+        END;
+
+
+        -- This one will contain the statements to be executed
+        -- order: 1- Mandatory, 2- VersionCheckMode, 3- VersionCheck
+
+        CREATE TABLE #StatementsToRun4FRKVersionCheck (
+            StatementId                 INT IDENTITY(1,1),
+            CheckName                   VARCHAR(256),
+            SubjectName                 VARCHAR(256),
+            SubjectFullPath             VARCHAR(1024),
+            StatementText               NVARCHAR(MAX),
+            StatementOutputsCounter     BIT,
+            OutputCounterExpectedValue  INT,
+            StatementOutputsExecRet     BIT,
+            StatementOutputsDateTime    BIT 
+        );
+
+        /* End of First Responder Kit consistency (temporary tables) */
+        
+            
 		/*
 		You can build your own table with a list of checks to skip. For example, you
 		might have some databases that you don't care about, or some checks you don't
@@ -215,10 +304,6 @@ AS
 		want to skip. This part of the code checks those parameters, gets the list,
 		and then saves those in a temp table. As we run each check, we'll see if we
 		need to skip it.
-
-		Really anal-retentive users will note that the @SkipChecksServer parameter is
-		not used. YET. We added that parameter in so that we could avoid changing the
-		stored proc's surface area (interface) later.
 		*/
 		/* --TOURSTOP07-- */
 		IF OBJECT_ID('tempdb..#SkipChecks') IS NOT NULL
@@ -231,6 +316,16 @@ AS
 			);
 		CREATE CLUSTERED INDEX IX_CheckID_DatabaseName ON #SkipChecks(CheckID, DatabaseName);
 
+        IF(OBJECT_ID('tempdb..#InvalidLogins') IS NOT NULL)
+        BEGIN
+            EXEC sp_executesql N'DROP TABLE #InvalidLogins;';
+        END;
+								 
+		CREATE TABLE #InvalidLogins (
+			LoginSID    varbinary(85),
+			LoginName   VARCHAR(256)
+		);
+
 		IF @SkipChecksTable IS NOT NULL
 			AND @SkipChecksSchema IS NOT NULL
 			AND @SkipChecksDatabase IS NOT NULL
@@ -238,10 +333,15 @@ AS
 				
 				IF @Debug IN (1, 2) RAISERROR('Inserting SkipChecks', 0, 1) WITH NOWAIT;
 				
-				SET @StringToExecute = 'INSERT INTO #SkipChecks(DatabaseName, CheckID, ServerName )
+				SET @StringToExecute = N'INSERT INTO #SkipChecks(DatabaseName, CheckID, ServerName )
 				SELECT DISTINCT DatabaseName, CheckID, ServerName
-				FROM ' + QUOTENAME(@SkipChecksDatabase) + '.' + QUOTENAME(@SkipChecksSchema) + '.' + QUOTENAME(@SkipChecksTable)
-					+ ' WHERE ServerName IS NULL OR ServerName = SERVERPROPERTY(''ServerName'') OPTION (RECOMPILE);';
+				FROM '
+				IF LTRIM(RTRIM(@SkipChecksServer)) <> ''
+					BEGIN
+					SET @StringToExecute += QUOTENAME(@SkipChecksServer) + N'.';
+					END
+				SET @StringToExecute += QUOTENAME(@SkipChecksDatabase) + N'.' + QUOTENAME(@SkipChecksSchema) + N'.' + QUOTENAME(@SkipChecksTable)
+					+ N' WHERE ServerName IS NULL OR ServerName = SERVERPROPERTY(''ServerName'') OPTION (RECOMPILE);';
 				EXEC(@StringToExecute);
 			END;
 
@@ -784,7 +884,7 @@ AS
 
 						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 1) WITH NOWAIT;
 
-                        IF SERVERPROPERTY('EngineName') <> 8 /* Azure Managed Instances need a special query */
+                        IF SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances need a special query */
                             BEGIN
 						    INSERT  INTO #BlitzResults
 								    ( CheckID ,
@@ -1008,6 +1108,8 @@ AS
 										/* Filter out databases that were recently restored: */
 										LEFT OUTER JOIN msdb.dbo.restorehistory rh ON bs.database_name = rh.destination_database_name AND rh.restore_date > DATEADD(dd, -14, GETDATE())
 								WHERE   UPPER(LEFT(bmf.physical_device_name, 3)) <> 'HTT' AND
+                                        bmf.physical_device_name NOT LIKE '\\%' AND -- GitHub Issue #2141
+                                        @IsWindowsOperatingSystem = 1 AND -- GitHub Issue #1995
                                         UPPER(LEFT(bmf.physical_device_name COLLATE SQL_Latin1_General_CP1_CI_AS, 3)) IN (
 										SELECT DISTINCT
 												UPPER(LEFT(mf.physical_name COLLATE SQL_Latin1_General_CP1_CI_AS, 3))
@@ -1206,7 +1308,35 @@ AS
 										AND l.name <> 'l_certSignSmDetach'; /* Added in SQL 2016 */
 					END;
 
-				IF NOT EXISTS ( SELECT  1
+                    IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
+								WHERE   CheckID = 2301 )
+					BEGIN
+						
+						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 2301) WITH NOWAIT;
+						
+                        INSERT INTO #InvalidLogins
+                        EXEC sp_validatelogins 
+                        ;
+                        
+						INSERT  INTO #BlitzResults
+								( CheckID ,
+								  Priority ,
+								  FindingsGroup ,
+								  Finding ,
+								  URL ,
+								  Details
+								)
+								SELECT  2301 AS CheckID ,
+										230 AS Priority ,
+										'Security' AS FindingsGroup ,
+										'Invalid login defined with Windows Authentication' AS Finding ,
+										'https://docs.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-validatelogins-transact-sql' AS URL ,
+										( 'Windows user or group ' + QUOTENAME(LoginName) + ' is mapped to a SQL Server principal but no longer exists in the Windows environment.') AS Details
+                                FROM #InvalidLogins
+                                ;
+                    END;
+				    IF NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 5 )
 					BEGIN
@@ -2071,7 +2201,8 @@ AS
 										  + '. Tables in the master database may not be restored in the event of a disaster.' ) AS Details
 								FROM    master.sys.tables
 								WHERE   is_ms_shipped = 0
-                                  AND   name NOT IN ('CommandLog','SqlServerVersions');
+                                  AND   name NOT IN ('CommandLog','SqlServerVersions','$ndo$srvproperty');
+								  /* That last one is the Dynamics NAV licensing table: https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/issues/2426 */
 					END;
 
 				IF NOT EXISTS ( SELECT  1
@@ -2282,7 +2413,7 @@ AS
 											200 AS Priority ,
 											'Monitoring' AS FindingsGroup ,
 											'Alerts Disabled' AS Finding ,
-											'https://www.BrentOzar.com/go/alerts/' AS URL ,
+											'https://BrentOzar.com/go/alert' AS URL ,
 											( 'The following Alert is disabled, please review and enable if desired: '
 											  + name ) AS Details
 									FROM    msdb.dbo.sysalerts
@@ -3043,7 +3174,7 @@ AS
 								  Details
 								)
 								SELECT  100 AS CheckID ,
-										50 AS Priority ,
+										170 AS Priority ,
 										'Reliability' AS FindingGroup ,
 										'Remote DAC Disabled' AS Finding ,
 										'https://BrentOzar.com/go/dac' AS URL ,
@@ -3467,12 +3598,13 @@ AS
                             AND SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */
 							BEGIN
 
-							IF (@ProductVersionMajor = 14 AND @ProductVersionMinor < 1000) OR
-							   (@ProductVersionMajor = 13 AND @ProductVersionMinor < 4001) OR
-							   (@ProductVersionMajor = 12 AND @ProductVersionMinor < 5000) OR
+							IF (@ProductVersionMajor = 15 AND @ProductVersionMinor < 2000) OR
+							   (@ProductVersionMajor = 14 AND @ProductVersionMinor < 1000) OR
+							   (@ProductVersionMajor = 13 AND @ProductVersionMinor < 5026) OR
+							   (@ProductVersionMajor = 12 AND @ProductVersionMinor < 6024) OR
 							   (@ProductVersionMajor = 11 AND @ProductVersionMinor < 7001) OR
-							   (@ProductVersionMajor = 10.5 AND @ProductVersionMinor < 6000) OR
-							   (@ProductVersionMajor = 10 AND @ProductVersionMinor < 6000) OR
+							   (@ProductVersionMajor = 10.5 /*AND @ProductVersionMinor < 6000*/) OR
+							   (@ProductVersionMajor = 10 /*AND @ProductVersionMinor < 6000*/) OR
 							   (@ProductVersionMajor = 9 /*AND @ProductVersionMinor <= 5000*/)
 								BEGIN
 								
@@ -3480,10 +3612,10 @@ AS
 								
 								INSERT INTO #BlitzResults(CheckID, Priority, FindingsGroup, Finding, URL, Details)
 									VALUES(128, 20, 'Reliability', 'Unsupported Build of SQL Server', 'https://BrentOzar.com/go/unsupported',
-										'Version ' + CAST(@ProductVersionMajor AS VARCHAR(100)) + '.' +
-										CASE WHEN @ProductVersionMajor > 9 THEN
-										CAST(@ProductVersionMinor AS VARCHAR(100)) + ' is no longer supported by Microsoft. You need to apply a service pack.'
-										ELSE ' is no longer support by Microsoft. You should be making plans to upgrade to a modern version of SQL Server.' END);
+										'Version ' + CAST(@ProductVersionMajor AS VARCHAR(100)) + 
+										CASE WHEN @ProductVersionMajor >= 11 THEN
+										'.' + CAST(@ProductVersionMinor AS VARCHAR(100)) + ' is no longer supported by Microsoft. You need to apply a service pack.'
+										ELSE ' is no longer supported by Microsoft. You should be making plans to upgrade to a modern version of SQL Server.' END);
 								END;
 
 							END;
@@ -3849,7 +3981,7 @@ AS
 				                        )
 				                        SELECT DISTINCT 150 AS CheckID ,
 					                            t.DatabaseName,
-						                        50 AS Priority ,
+						                        170 AS Priority ,
 						                        'Reliability' AS FindingsGroup ,
 						                        'Errors Logged Recently in the Default Trace' AS Finding ,
 						                        'https://BrentOzar.com/go/defaulttrace' AS URL ,
@@ -3905,7 +4037,7 @@ AS
 		
 								IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 160) WITH NOWAIT;
 								
-								SET @StringToExecute = 'INSERT INTO #BlitzResults (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+								SET @StringToExecute = N'INSERT INTO #BlitzResults (CheckID, Priority, FindingsGroup, Finding, URL, Details)
 			                        SELECT TOP 1 160 AS CheckID,
 			                        100 AS Priority,
 			                        ''Performance'' AS FindingsGroup,
@@ -3916,8 +4048,14 @@ AS
                                     CROSS APPLY sys.dm_exec_plan_attributes(qs.plan_handle) pa
                                     WHERE pa.attribute = ''dbid''
                                     GROUP BY qs.query_hash, pa.value
-                                    HAVING COUNT(DISTINCT plan_handle) > 50
-									ORDER BY COUNT(DISTINCT plan_handle) DESC OPTION (RECOMPILE);';
+                                    HAVING COUNT(DISTINCT plan_handle) > ';
+
+								IF 50 > (SELECT COUNT(*) FROM sys.databases)
+									SET @StringToExecute = @StringToExecute + N' 50 ';
+								ELSE
+									SELECT @StringToExecute = @StringToExecute + CAST(COUNT(*) * 2 AS NVARCHAR(50)) FROM sys.databases;
+
+								SET @StringToExecute = @StringToExecute + N' ORDER BY COUNT(DISTINCT plan_handle) DESC OPTION (RECOMPILE);';
 		
 								IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;
 								IF @Debug = 2 AND @StringToExecute IS NULL PRINT '@StringToExecute has gone NULL, for some reason.';
@@ -4041,6 +4179,14 @@ AS
 						  SELECT 'is_trustworthy_on', 0, 137, 210, 'Trustworthy Enabled', 'https://BrentOzar.com/go/dbdefaults', NULL
 						  FROM sys.all_columns
 						  WHERE name = 'is_trustworthy_on' AND object_id = OBJECT_ID('sys.databases');
+						INSERT INTO #DatabaseDefaults
+						  SELECT 'is_broker_enabled', 0, 230, 210, 'Broker Enabled', 'https://BrentOzar.com/go/dbdefaults', NULL
+						  FROM sys.all_columns
+						  WHERE name = 'is_broker_enabled' AND object_id = OBJECT_ID('sys.databases');
+						INSERT INTO #DatabaseDefaults
+						  SELECT 'is_honor_broker_priority_on', 0, 231, 210, 'Honor Broker Priority Enabled', 'https://BrentOzar.com/go/dbdefaults', NULL
+						  FROM sys.all_columns
+						  WHERE name = 'is_honor_broker_priority_on' AND object_id = OBJECT_ID('sys.databases');
 						INSERT INTO #DatabaseDefaults
 						  SELECT 'is_parameterization_forced', 0, 138, 210, 'Forced Parameterization Enabled', 'https://BrentOzar.com/go/dbdefaults', NULL
 						  FROM sys.all_columns
@@ -4259,6 +4405,511 @@ IF @ProductVersionMajor >= 10
 
 					END;
 					END;
+                    
+/*This checks that First Responder Kit is consistent. 
+It assumes that all the objects of the kit resides in the same database, the one in which this SP is stored
+It also is ready to check for installation in another schema.
+*/
+IF(
+    NOT EXISTS ( 
+        SELECT  1
+        FROM    #SkipChecks
+        WHERE   DatabaseName IS NULL AND CheckID = 226 
+    )
+)
+BEGIN
+
+    IF @Debug IN (1, 2) RAISERROR('Running check with id %d',0,1,2000);
+
+    SET @spBlitzFullName                    = QUOTENAME(DB_NAME()) + '.' +QUOTENAME(OBJECT_SCHEMA_NAME(@@PROCID)) + '.' + QUOTENAME(OBJECT_NAME(@@PROCID));
+    SET @BlitzIsOutdatedComparedToOthers    = 0;
+    SET @tsql                               = NULL;
+    SET @VersionCheckModeExistsTSQL         = NULL;
+    SET @BlitzProcDbName                    = DB_NAME();
+    SET @ExecRet                            = NULL;
+    SET @InnerExecRet                       = NULL;
+    SET @TmpCnt                             = NULL;
+
+    SET @PreviousComponentName              = NULL;
+    SET @PreviousComponentFullPath          = NULL;
+    SET @CurrentStatementId                 = NULL;
+    SET @CurrentComponentSchema             = NULL;
+    SET @CurrentComponentName               = NULL;
+    SET @CurrentComponentType               = NULL;
+    SET @CurrentComponentVersionDate        = NULL;
+    SET @CurrentComponentFullName           = NULL;
+    SET @CurrentComponentMandatory          = NULL;
+    SET @MaximumVersionDate                 = NULL;
+
+    SET @StatementCheckName                 = NULL;
+    SET @StatementOutputsCounter            = NULL;
+    SET @OutputCounterExpectedValue         = NULL;
+    SET @StatementOutputsExecRet            = NULL;
+    SET @StatementOutputsDateTime           = NULL;
+
+    SET @CurrentComponentMandatoryCheckOK   = NULL;
+    SET @CurrentComponentVersionCheckModeOK = NULL;
+
+    SET @canExitLoop                        = 0;
+    SET @frkIsConsistent                    = 0;
+
+
+    SET @tsql = 'USE ' + QUOTENAME(@BlitzProcDbName) + ';' + @crlf +
+                'WITH FRKComponents (' + @crlf +
+                '    ObjectName,' + @crlf +
+                '    ObjectType,' + @crlf +
+                '    MandatoryComponent' + @crlf +
+                ')' + @crlf +
+                'AS (' + @crlf +
+                '    SELECT ''sp_AllNightLog'',''P'' ,0' + @crlf +
+                '    UNION ALL' + @crlf +
+                '    SELECT ''sp_AllNightLog_Setup'', ''P'',0' + @crlf +
+                '    UNION ALL ' + @crlf +
+                '    SELECT ''sp_Blitz'',''P'',0' + @crlf +
+                '    UNION ALL ' + @crlf +
+                '    SELECT ''sp_BlitzBackups'',''P'',0' + @crlf +
+                '    UNION ALL ' + @crlf +
+                '    SELECT ''sp_BlitzCache'',''P'',0' + @crlf +
+                '    UNION ALL ' + @crlf +
+                '    SELECT ''sp_BlitzFirst'',''P'',0' + @crlf +
+                '    UNION ALL' + @crlf +
+                '    SELECT ''sp_BlitzIndex'',''P'',0' + @crlf +
+                '    UNION ALL ' + @crlf +
+                '    SELECT ''sp_BlitzLock'',''P'',0' + @crlf +
+                '    UNION ALL ' + @crlf +
+                '    SELECT ''sp_BlitzQueryStore'',''P'',0' + @crlf +
+                '    UNION ALL ' + @crlf +
+                '    SELECT ''sp_BlitzWho'',''P'',0' + @crlf +
+                '    UNION ALL ' + @crlf +
+                '    SELECT ''sp_DatabaseRestore'',''P'',0' + @crlf +
+                '    UNION ALL ' + @crlf +
+                '    SELECT ''sp_ineachdb'',''P'',0' + @crlf +
+                '    UNION ALL' + @crlf +
+                '    SELECT ''SqlServerVersions'',''U'',0' + @crlf +
+                ')' + @crlf +
+                'INSERT INTO #FRKObjects (' + @crlf +
+                '    DatabaseName,ObjectSchemaName,ObjectName, ObjectType,MandatoryComponent' + @crlf +
+                ')' + @crlf +
+                'SELECT DB_NAME(),SCHEMA_NAME(o.schema_id), c.ObjectName,c.ObjectType,c.MandatoryComponent' + @crlf +
+                'FROM ' + @crlf +
+                '    FRKComponents c' + @crlf +
+                'LEFT JOIN ' + @crlf +
+                '    sys.objects o' + @crlf +
+                'ON c.ObjectName  = o.[name]' + @crlf +
+                'AND c.ObjectType = o.[type]' + @crlf +
+                --'WHERE o.schema_id IS NOT NULL' + @crlf +
+                ';'
+                ;
+
+    EXEC @ExecRet = sp_executesql @tsql ;
+
+    -- TODO: add check for statement success
+
+    -- TODO: based on SP requirements and presence (SchemaName is not null) ==> update MandatoryComponent column
+
+    -- Filling #StatementsToRun4FRKVersionCheck 
+    INSERT INTO #StatementsToRun4FRKVersionCheck (
+        CheckName,StatementText,SubjectName,SubjectFullPath, StatementOutputsCounter,OutputCounterExpectedValue,StatementOutputsExecRet,StatementOutputsDateTime
+    )
+    SELECT 
+        'Mandatory',
+        'SELECT @cnt = COUNT(*) FROM #FRKObjects WHERE ObjectSchemaName IS NULL AND ObjectName = ''' + ObjectName + ''' AND MandatoryComponent = 1;',
+        ObjectName,
+        QUOTENAME(DatabaseName) + '.' + QUOTENAME(ObjectSchemaName) + '.' + QUOTENAME(ObjectName),
+        1,
+        0,
+        0,
+        0
+    FROM #FRKObjects
+    UNION ALL 
+    SELECT 
+        'VersionCheckMode',
+        'SELECT @cnt = COUNT(*) FROM ' + 
+        QUOTENAME(DatabaseName) + '.sys.all_parameters ' + 
+        'where object_id = OBJECT_ID(''' + QUOTENAME(DatabaseName) + '.' + QUOTENAME(ObjectSchemaName) + '.' + QUOTENAME(ObjectName) + ''') AND [name] = ''@VersionCheckMode'';',
+        ObjectName,
+        QUOTENAME(DatabaseName) + '.' + QUOTENAME(ObjectSchemaName) + '.' + QUOTENAME(ObjectName),
+        1,
+        1,
+        0,
+        0
+    FROM #FRKObjects
+    WHERE ObjectType = 'P' 
+    AND ObjectSchemaName IS NOT NULL
+    UNION ALL
+    SELECT 
+        'VersionCheck',
+        'EXEC @ExecRet = ' + QUOTENAME(DatabaseName) + '.' + QUOTENAME(ObjectSchemaName) + '.' + QUOTENAME(ObjectName) + ' @VersionCheckMode = 1 , @VersionDate = @ObjDate OUTPUT;',
+        ObjectName,
+        QUOTENAME(DatabaseName) + '.' + QUOTENAME(ObjectSchemaName) + '.' + QUOTENAME(ObjectName),
+        0,
+        0,
+        1,
+        1
+    FROM #FRKObjects
+    WHERE ObjectType = 'P' 
+    AND ObjectSchemaName IS NOT NULL
+    ;
+    IF(@Debug in (1,2))
+    BEGIN
+        SELECT * 
+        FROM #StatementsToRun4FRKVersionCheck ORDER BY SubjectName,SubjectFullPath,StatementId  -- in case of schema change  ;
+    END;
+    
+    
+    -- loop on queries...
+    WHILE(@canExitLoop = 0)
+    BEGIN
+        SET @CurrentStatementId         = NULL;
+
+        SELECT TOP 1
+            @StatementCheckName         = CheckName,
+            @CurrentStatementId         = StatementId ,
+            @CurrentComponentName       = SubjectName,
+            @CurrentComponentFullName   = SubjectFullPath,
+            @tsql                       = StatementText,
+            @StatementOutputsCounter    = StatementOutputsCounter,
+            @OutputCounterExpectedValue = OutputCounterExpectedValue ,
+            @StatementOutputsExecRet    = StatementOutputsExecRet,
+            @StatementOutputsDateTime   = StatementOutputsDateTime
+        FROM #StatementsToRun4FRKVersionCheck
+        ORDER BY SubjectName, SubjectFullPath,StatementId /* in case of schema change */
+        ;
+
+        -- loop exit condition
+        IF(@CurrentStatementId IS NULL)
+        BEGIN
+            BREAK;
+        END;
+
+        IF @Debug IN (1, 2) RAISERROR('    Statement: %s',0,1,@tsql);
+
+        -- we start a new component
+        IF(@PreviousComponentName IS NULL OR 
+            (@PreviousComponentName IS NOT NULL AND @PreviousComponentName <> @CurrentComponentName) OR
+            (@PreviousComponentName IS NOT NULL AND @PreviousComponentName = @CurrentComponentName AND @PreviousComponentFullPath <> @CurrentComponentFullName)
+        )
+        BEGIN
+            -- reset variables
+            SET @CurrentComponentMandatoryCheckOK   = 0;
+            SET @CurrentComponentVersionCheckModeOK = 0;
+            SET @PreviousComponentName              = @CurrentComponentName;
+            SET @PreviousComponentFullPath          = @CurrentComponentFullName ;
+        END;
+
+        IF(@StatementCheckName NOT IN ('Mandatory','VersionCheckMode','VersionCheck'))
+        BEGIN
+            INSERT  INTO #BlitzResults( 
+                CheckID ,
+                Priority ,
+                FindingsGroup ,
+                Finding ,
+                URL ,
+                Details
+            )
+            SELECT 
+                226 AS CheckID ,
+                253 AS Priority ,
+                'First Responder Kit' AS FindingsGroup ,
+                'Version Check Failed (code generator changed)' AS Finding ,
+                'http://FirstResponderKit.org' AS URL ,
+                'Download an updated First Responder Kit. Your version check failed because a change has been made to the version check code generator.' + @crlf +
+                'Error: No handler for check with name "' + ISNULL(@StatementCheckName,'') + '"' AS Details
+            ;
+            
+            -- we will stop the test because it's possible to get the same message for other components
+            SET @canExitLoop = 1;
+            CONTINUE;
+        END;
+
+        IF(@StatementCheckName = 'Mandatory')
+        BEGIN
+            -- outputs counter
+            EXEC @ExecRet = sp_executesql @tsql, N'@cnt INT OUTPUT',@cnt = @TmpCnt OUTPUT;
+
+            IF(@ExecRet <> 0)
+            BEGIN
+            
+                INSERT  INTO #BlitzResults( 
+                    CheckID ,
+                    Priority ,
+                    FindingsGroup ,
+                    Finding ,
+                    URL ,
+                    Details
+                )
+                SELECT 
+                    226 AS CheckID ,
+                    253 AS Priority ,
+                    'First Responder Kit' AS FindingsGroup ,
+                    'Version Check Failed (dynamic query failure)' AS Finding ,
+                    'http://FirstResponderKit.org' AS URL ,
+                    'Download an updated First Responder Kit. Your version check failed due to dynamic query failure.' + @crlf +
+                    'Error: following query failed at execution (check if component [' + ISNULL(@CurrentComponentName,@CurrentComponentName) + '] is mandatory and missing)' + @crlf +
+                    @tsql AS Details
+                ;
+                
+                -- we will stop the test because it's possible to get the same message for other components
+                SET @canExitLoop = 1;
+                CONTINUE;
+            END;
+
+            IF(@TmpCnt <> @OutputCounterExpectedValue)
+            BEGIN
+                INSERT  INTO #BlitzResults( 
+                    CheckID ,
+                    Priority ,
+                    FindingsGroup ,
+                    Finding ,
+                    URL ,
+                    Details
+                )
+                SELECT 
+                    227 AS CheckID ,
+                    253 AS Priority ,
+                    'First Responder Kit' AS FindingsGroup ,
+                    'Component Missing: ' + @CurrentComponentName AS Finding ,
+                    'http://FirstResponderKit.org' AS URL ,
+                    'Download an updated version of the First Responder Kit to install it.' AS Details
+                ;
+                
+                -- as it's missing, no value for SubjectFullPath
+                DELETE FROM #StatementsToRun4FRKVersionCheck WHERE SubjectName = @CurrentComponentName ;
+                CONTINUE;
+            END;
+
+            SET @CurrentComponentMandatoryCheckOK = 1;
+        END;
+        
+        IF(@StatementCheckName = 'VersionCheckMode')
+        BEGIN
+            IF(@CurrentComponentMandatoryCheckOK = 0)
+            BEGIN
+                INSERT  INTO #BlitzResults( 
+                    CheckID ,
+                    Priority ,
+                    FindingsGroup ,
+                    Finding ,
+                    URL ,
+                    Details
+                )
+                SELECT 
+                    226 AS CheckID ,
+                    253 AS Priority ,
+                    'First Responder Kit' AS FindingsGroup ,
+                    'Version Check Failed (unexpectedly modified checks ordering)' AS Finding ,
+                    'http://FirstResponderKit.org' AS URL ,
+                    'Download an updated First Responder Kit. Version check failed because "Mandatory" check has not been completed before for current component' + @crlf +
+                    'Error: version check mode happenned before "Mandatory" check for component called "' + @CurrentComponentFullName + '"'
+                ;
+                
+                -- we will stop the test because it's possible to get the same message for other components
+                SET @canExitLoop = 1;
+                CONTINUE;
+            END;
+
+            -- outputs counter
+            EXEC @ExecRet = sp_executesql @tsql, N'@cnt INT OUTPUT',@cnt = @TmpCnt OUTPUT;
+
+            IF(@ExecRet <> 0)
+            BEGIN
+                INSERT  INTO #BlitzResults( 
+                    CheckID ,
+                    Priority ,
+                    FindingsGroup ,
+                    Finding ,
+                    URL ,
+                    Details
+                )
+                SELECT 
+                    226 AS CheckID ,
+                    253 AS Priority ,
+                    'First Responder Kit' AS FindingsGroup ,
+                    'Version Check Failed (dynamic query failure)' AS Finding ,
+                    'http://FirstResponderKit.org' AS URL ,
+                    'Download an updated First Responder Kit. Version check failed because a change has been made to the code generator.' + @crlf +
+                    'Error: following query failed at execution (check if component [' + @CurrentComponentFullName + '] can run in VersionCheckMode)' + @crlf +
+                    @tsql AS Details
+                ;
+                
+                -- we will stop the test because it's possible to get the same message for other components
+                SET @canExitLoop = 1;
+                CONTINUE;
+            END;
+
+            IF(@TmpCnt <> @OutputCounterExpectedValue)
+            BEGIN
+                INSERT  INTO #BlitzResults( 
+                    CheckID ,
+                    Priority ,
+                    FindingsGroup ,
+                    Finding ,
+                    URL ,
+                    Details
+                )
+                SELECT 
+                    228 AS CheckID ,
+                    253 AS Priority ,
+                    'First Responder Kit' AS FindingsGroup ,
+                    'Component Outdated: ' + @CurrentComponentFullName AS Finding ,
+                    'http://FirstResponderKit.org' AS URL ,
+                    'Download an updated First Responder Kit. Component ' + @CurrentComponentFullName + ' is not at the minimum version required to run this procedure' + @crlf +
+                    'VersionCheckMode has been introduced in component version date after "20190320". This means its version is lower than or equal to that date.' AS Details;
+                ;            
+                            
+                DELETE FROM #StatementsToRun4FRKVersionCheck WHERE SubjectFullPath = @CurrentComponentFullName ;
+                CONTINUE;
+            END;
+
+            SET @CurrentComponentVersionCheckModeOK = 1;
+        END;    
+
+        IF(@StatementCheckName = 'VersionCheck')
+        BEGIN
+            IF(@CurrentComponentMandatoryCheckOK = 0 OR @CurrentComponentVersionCheckModeOK = 0)
+            BEGIN
+                INSERT  INTO #BlitzResults( 
+                    CheckID ,
+                    Priority ,
+                    FindingsGroup ,
+                    Finding ,
+                    URL ,
+                    Details
+                )
+                SELECT 
+                    226 AS CheckID ,
+                    253 AS Priority ,
+                    'First Responder Kit' AS FindingsGroup ,
+                    'Version Check Failed (unexpectedly modified checks ordering)' AS Finding ,
+                    'http://FirstResponderKit.org' AS URL ,
+                    'Download an updated First Responder Kit. Version check failed because "VersionCheckMode" check has not been completed before for component called "' + @CurrentComponentFullName + '"' + @crlf +
+                    'Error: VersionCheck happenned before "VersionCheckMode" check for component called "' + @CurrentComponentFullName + '"'
+                ;
+                
+                -- we will stop the test because it's possible to get the same message for other components
+                SET @canExitLoop = 1;
+                CONTINUE;
+            END;
+
+            EXEC @ExecRet = sp_executesql @tsql , N'@ExecRet INT OUTPUT, @ObjDate DATETIME OUTPUT', @ExecRet = @InnerExecRet OUTPUT, @ObjDate = @CurrentComponentVersionDate OUTPUT;
+
+            IF(@ExecRet <> 0)
+            BEGIN
+                INSERT  INTO #BlitzResults( 
+                    CheckID ,
+                    Priority ,
+                    FindingsGroup ,
+                    Finding ,
+                    URL ,
+                    Details
+                )
+                SELECT 
+                    226 AS CheckID ,
+                    253 AS Priority ,
+                    'First Responder Kit' AS FindingsGroup ,
+                    'Version Check Failed (dynamic query failure)' AS Finding ,
+                    'http://FirstResponderKit.org' AS URL ,
+                    'Download an updated First Responder Kit. The version check failed because a change has been made to the code generator.' + @crlf +
+                    'Error: following query failed at execution (check if component [' + @CurrentComponentFullName + '] is at the expected version)' + @crlf +
+                    @tsql AS Details
+                ;
+                
+                -- we will stop the test because it's possible to get the same message for other components
+                SET @canExitLoop = 1;
+                CONTINUE;
+            END;
+            
+            
+            IF(@InnerExecRet <> 0)
+            BEGIN                
+                INSERT  INTO #BlitzResults( 
+                    CheckID ,
+                    Priority ,
+                    FindingsGroup ,
+                    Finding ,
+                    URL ,
+                    Details
+                )
+                SELECT 
+                    226 AS CheckID ,
+                    253 AS Priority ,
+                    'First Responder Kit' AS FindingsGroup ,
+                    'Version Check Failed (Failed dynamic SP call to ' + @CurrentComponentFullName + ')' AS Finding ,
+                    'http://FirstResponderKit.org' AS URL ,
+                    'Download an updated First Responder Kit. Error: following query failed at execution (check if component [' + @CurrentComponentFullName + '] is at the expected version)' + @crlf +
+                    'Return code: ' + CONVERT(VARCHAR(10),@InnerExecRet) + @crlf +
+                    'T-SQL Query: ' + @crlf + 
+                    @tsql AS Details
+                ;
+                
+                -- advance to next component
+                DELETE FROM #StatementsToRun4FRKVersionCheck WHERE SubjectFullPath = @CurrentComponentFullName ;
+                CONTINUE;
+            END;
+
+            IF(@CurrentComponentVersionDate < @VersionDate)
+            BEGIN
+            
+                INSERT  INTO #BlitzResults( 
+                    CheckID ,
+                    Priority ,
+                    FindingsGroup ,
+                    Finding ,
+                    URL ,
+                    Details
+                )
+                SELECT 
+                    228 AS CheckID ,
+                    253 AS Priority ,
+                    'First Responder Kit' AS FindingsGroup ,
+                    'Component Outdated: ' + @CurrentComponentFullName AS Finding ,
+                    'http://FirstResponderKit.org' AS URL ,
+                    'Download and install the latest First Responder Kit - you''re running some older code, and it doesn''t get better with age.' AS Details
+                ;            
+            
+                RAISERROR('Component %s is outdated',10,1,@CurrentComponentFullName);
+                -- advance to next component
+                DELETE FROM #StatementsToRun4FRKVersionCheck WHERE SubjectFullPath = @CurrentComponentFullName ;
+                CONTINUE;
+            END;
+
+            ELSE IF(@CurrentComponentVersionDate > @VersionDate AND @BlitzIsOutdatedComparedToOthers = 0)
+            BEGIN
+                SET @BlitzIsOutdatedComparedToOthers = 1;
+                RAISERROR('Procedure %s is outdated',10,1,@spBlitzFullName);
+                IF(@MaximumVersionDate IS NULL OR @MaximumVersionDate < @CurrentComponentVersionDate)
+                BEGIN
+                    SET @MaximumVersionDate = @CurrentComponentVersionDate;
+                END;
+            END;
+            /* Kept for debug purpose:
+            ELSE 
+            BEGIN
+                INSERT  INTO #BlitzResults( 
+                    CheckID ,
+                    Priority ,
+                    FindingsGroup ,
+                    Finding ,
+                    URL ,
+                    Details
+                )
+                SELECT 
+                    2000 AS CheckID ,
+                    250 AS Priority ,
+                    'Informational' AS FindingsGroup ,
+                    'First Responder kit component ' + @CurrentComponentFullName + ' is at the expected version' AS Finding ,
+                    'https://www.BrentOzar.com/blitz/' AS URL ,
+                    'Version date is: ' + CONVERT(VARCHAR(32),@CurrentComponentVersionDate,121) AS Details
+                ;
+            END;
+            */
+        END;
+
+        -- could be performed differently to minimize computation
+        DELETE FROM #StatementsToRun4FRKVersionCheck WHERE StatementId = @CurrentStatementId ;
+    END;
+END;
+
 
 /*This counts memory dumps and gives min and max date of in view*/
 IF @ProductVersionMajor >= 10
@@ -4802,7 +5453,7 @@ IF @ProductVersionMajor >= 10
 			        50 AS Priority ,
 			        'DBCC Events' AS FindingsGroup ,
 			        'Overall Events' AS Finding ,
-			        '' AS URL ,
+			        'https://www.BrentOzar.com/go/dbcc' AS URL ,
 			        CAST(COUNT(*) AS NVARCHAR(100)) + ' DBCC events have taken place between ' + CONVERT(NVARCHAR(30), MIN(d.min_start_time)) + ' and ' + CONVERT(NVARCHAR(30),  MAX(d.max_start_time)) +
 					'. This does not include CHECKDB and other usually benign DBCC events.'
 					AS Details
@@ -4872,7 +5523,7 @@ IF @ProductVersionMajor >= 10
 					        10 AS Priority ,
 					        'Performance' AS FindingsGroup ,
 					        'DBCC DROPCLEANBUFFERS Ran Recently' AS Finding ,
-					        '' AS URL ,
+					        'https://www.BrentOzar.com/go/dbcc' AS URL ,
 					        'The user ' + COALESCE(d.nt_user_name, d.login_name) + ' has run DBCC DROPCLEANBUFFERS ' + CAST(COUNT(*) AS NVARCHAR(100)) + ' times between ' + CONVERT(NVARCHAR(30), MIN(d.min_start_time)) + ' and ' + CONVERT(NVARCHAR(30),  MAX(d.max_start_time)) +
 							'. If this is a production box, know that you''re clearing all data out of memory when this happens. What kind of monster would do that?'
 							AS Details
@@ -4903,7 +5554,7 @@ IF @ProductVersionMajor >= 10
 					        10 AS Priority ,
 					        'DBCC Events' AS FindingsGroup ,
 					        'DBCC FREEPROCCACHE Ran Recently' AS Finding ,
-					        '' AS URL ,
+					        'https://www.BrentOzar.com/go/dbcc' AS URL ,
 					        'The user ' + COALESCE(d.nt_user_name, d.login_name) + ' has run DBCC FREEPROCCACHE ' + CAST(COUNT(*) AS NVARCHAR(100)) + ' times between ' + CONVERT(NVARCHAR(30), MIN(d.min_start_time)) + ' and ' + CONVERT(NVARCHAR(30),  MAX(d.max_start_time)) +
 							'. This has bad idea jeans written all over its butt, like most other bad idea jeans.'
 							AS Details
@@ -4934,7 +5585,7 @@ IF @ProductVersionMajor >= 10
 					        50 AS Priority ,
 					        'Performance' AS FindingsGroup ,
 					        'Wait Stats Cleared Recently' AS Finding ,
-					        '' AS URL ,
+					        'https://www.BrentOzar.com/go/dbcc' AS URL ,
 					        'The user ' + COALESCE(d.nt_user_name, d.login_name) + ' has run DBCC SQLPERF(''SYS.DM_OS_WAIT_STATS'',CLEAR) ' + CAST(COUNT(*) AS NVARCHAR(100)) + ' times between ' + CONVERT(NVARCHAR(30), MIN(d.min_start_time)) + ' and ' + CONVERT(NVARCHAR(30),  MAX(d.max_start_time)) +
 							'. Why are you clearing wait stats? What are you hiding?'
 							AS Details
@@ -4962,10 +5613,10 @@ IF @ProductVersionMajor >= 10
 									  [URL] ,
 									  [Details] )
 						SELECT 209 AS CheckID ,
-						        50 AS Priority ,
+						        10 AS Priority ,
 						        'Reliability' AS FindingsGroup ,
 						        'DBCC WRITEPAGE Used Recently' AS Finding ,
-						        '' AS URL ,
+						        'https://www.BrentOzar.com/go/dbcc' AS URL ,
 						        'The user ' + COALESCE(d.nt_user_name, d.login_name) + ' has run DBCC WRITEPAGE ' + CAST(COUNT(*) AS NVARCHAR(100)) + ' times between ' + CONVERT(NVARCHAR(30), MIN(d.min_start_time)) + ' and ' + CONVERT(NVARCHAR(30),  MAX(d.max_start_time)) +
 								'. So, uh, are they trying to fix corruption, or cause corruption?'
 								AS Details
@@ -4996,7 +5647,7 @@ IF @ProductVersionMajor >= 10
 						        10 AS Priority ,
 						        'Performance' AS FindingsGroup ,
 						        'DBCC SHRINK% Ran Recently' AS Finding ,
-						        '' AS URL ,
+						        'https://www.BrentOzar.com/go/dbcc' AS URL ,
 						        'The user ' + COALESCE(d.nt_user_name, d.login_name) + ' has run file shrinks ' + CAST(COUNT(*) AS NVARCHAR(100)) + ' times between ' + CONVERT(NVARCHAR(30), MIN(d.min_start_time)) + ' and ' + CONVERT(NVARCHAR(30),  MAX(d.max_start_time)) +
 								'. So, uh, are they trying cause bad performance on purpose?'
 								AS Details
@@ -5074,9 +5725,9 @@ IF @ProductVersionMajor >= 10
 										DB_NAME(s.database_id)
 										+ '' has ''
 										+ CONVERT(NVARCHAR(20), COUNT_BIG(*))
-										+ '' open implicit transactions ''
-										+ '' with an oldest begin time of ''
-										+ CONVERT(NVARCHAR(30), MIN(tat.transaction_begin_time)) AS details
+										+ '' open implicit transactions with an oldest begin time of ''
+										+ CONVERT(NVARCHAR(30), MIN(tat.transaction_begin_time)) 
+										+ '' Run sp_BlitzWho and check the is_implicit_transaction column to see the culprits.'' AS details
 								FROM    sys.dm_tran_active_transactions AS tat
 								LEFT JOIN sys.dm_tran_session_transactions AS tst
 								ON tst.transaction_id = tat.transaction_id
@@ -5101,7 +5752,7 @@ IF @ProductVersionMajor >= 10
 								WHERE   DatabaseName IS NULL AND CheckID = 221 )
 					BEGIN
 						
-						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 216) WITH NOWAIT;
+						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 221) WITH NOWAIT;
 						
 							WITH reboot_airhorn
 							    AS
@@ -5132,6 +5783,132 @@ IF @ProductVersionMajor >= 10
 						
 
 					END;
+
+				IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
+								WHERE   DatabaseName IS NULL AND CheckID = 229 )
+						AND CAST(SERVERPROPERTY('Edition') AS NVARCHAR(4000)) LIKE '%Evaluation%'
+					BEGIN
+						
+						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 229) WITH NOWAIT;
+						
+							INSERT  INTO #BlitzResults
+									( CheckID ,
+									  Priority ,
+									  FindingsGroup ,
+									  Finding ,
+									  URL ,
+									  Details
+									)														
+							SELECT 229 AS CheckID,
+							       1 AS Priority,
+							       'Reliability' AS FindingsGroup,
+							       'Evaluation Edition' AS Finding,
+							       'https://www.BrentOzar.com/go/workgroup' AS URL,
+							       'This server will stop working on: ' + CAST(CONVERT(DATETIME, DATEADD(DD, 180, create_date), 102) AS VARCHAR(100)) AS details
+							FROM   sys.server_principals
+							WHERE sid = 0x010100000000000512000000; 						
+						
+					END;
+
+
+
+
+
+				IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
+								WHERE   DatabaseName IS NULL AND CheckID = 233 )
+					BEGIN
+						
+						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 233) WITH NOWAIT;
+						
+
+						IF EXISTS (SELECT * FROM sys.all_columns WHERE object_id = OBJECT_ID('sys.dm_os_memory_clerks') AND name = 'pages_kb')
+							BEGIN
+							/* SQL 2012+ version */
+							SET @StringToExecute = N'
+							INSERT  INTO #BlitzResults
+									( CheckID ,
+									  Priority ,
+									  FindingsGroup ,
+									  Finding ,
+									  URL ,
+									  Details
+									)														
+							SELECT 233 AS CheckID,
+							       50 AS Priority,
+							       ''Performance'' AS FindingsGroup,
+							       ''Memory Leak in USERSTORE_TOKENPERM Cache'' AS Finding,
+							       ''https://www.BrentOzar.com/go/userstore'' AS URL,
+							       N''UserStore_TokenPerm clerk is using '' + CAST(CAST(SUM(CASE WHEN type = ''USERSTORE_TOKENPERM'' AND name = ''TokenAndPermUserStore'' THEN pages_kb * 1.0 ELSE 0.0 END) / 1024.0 / 1024.0 AS INT) AS NVARCHAR(100)) 
+								   		+ N''GB RAM, total buffer pool is '' + CAST(CAST(SUM(pages_kb) / 1024.0 / 1024.0 AS INT) AS NVARCHAR(100)) + N''GB.''
+								   AS details
+							FROM sys.dm_os_memory_clerks
+							HAVING SUM(CASE WHEN type = ''USERSTORE_TOKENPERM'' AND name = ''TokenAndPermUserStore'' THEN pages_kb * 1.0 ELSE 0.0 END) / SUM(pages_kb) >= 0.1					
+							  AND SUM(pages_kb) / 1024.0 / 1024.0 >= 1; /* At least 1GB RAM overall */';
+							EXEC sp_executesql @StringToExecute;
+							END
+						ELSE
+							BEGIN
+							/* Antiques Roadshow SQL 2008R2 - version */
+							SET @StringToExecute = N'
+							INSERT  INTO #BlitzResults
+									( CheckID ,
+									  Priority ,
+									  FindingsGroup ,
+									  Finding ,
+									  URL ,
+									  Details
+									)														
+							SELECT 233 AS CheckID,
+							       50 AS Priority,
+							       ''Performance'' AS FindingsGroup,
+							       ''Memory Leak in USERSTORE_TOKENPERM Cache'' AS Finding,
+							       ''https://www.BrentOzar.com/go/userstore'' AS URL,
+							       N''UserStore_TokenPerm clerk is using '' + CAST(CAST(SUM(CASE WHEN type = ''USERSTORE_TOKENPERM'' AND name = ''TokenAndPermUserStore'' THEN single_pages_kb + multi_pages_kb * 1.0 ELSE 0.0 END) / 1024.0 / 1024.0 AS INT) AS NVARCHAR(100)) 
+								   		+ N''GB RAM, total buffer pool is '' + CAST(CAST(SUM(single_pages_kb + multi_pages_kb) / 1024.0 / 1024.0 AS INT) AS NVARCHAR(100)) + N''GB.''
+								   AS details
+							FROM sys.dm_os_memory_clerks
+							HAVING SUM(CASE WHEN type = ''USERSTORE_TOKENPERM'' AND name = ''TokenAndPermUserStore'' THEN single_pages_kb + multi_pages_kb * 1.0 ELSE 0.0 END) / SUM(single_pages_kb + multi_pages_kb) >= 0.1
+							  AND SUM(single_pages_kb + multi_pages_kb) / 1024.0 / 1024.0 >= 1; /* At least 1GB RAM overall */';
+							EXEC sp_executesql @StringToExecute;
+							END
+
+					END;
+
+
+
+
+
+				IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
+								WHERE   DatabaseName IS NULL AND CheckID = 234 )
+					BEGIN
+						
+						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 234) WITH NOWAIT;
+						
+							INSERT  INTO #BlitzResults
+									( CheckID ,
+									  Priority ,
+									  DatabaseName ,
+									  FindingsGroup ,
+									  Finding ,
+									  URL ,
+									  Details
+									)														
+							SELECT 234 AS CheckID,
+							       100 AS Priority,
+								   db_name(f.database_id) AS DatabaseName,
+							       'Reliability' AS FindingsGroup,
+							       'SQL Server Update May Fail' AS Finding,
+							       'https://desertdba.com/failovers-cant-serve-two-masters/' AS URL,
+							       'This database has a file with a logical name of ''master'', which can break SQL Server updates. Rename it in SSMS by right-clicking on the database, go into Properties, and rename the file. Takes effect instantly.' AS details
+							FROM master.sys.master_files f
+							WHERE (f.name = N'master')
+							  AND f.database_id > 4
+							  AND db_name(f.database_id) <> 'master'; /* Thanks Michaels3 for catching this */
+					END;
+
 
 
 
@@ -5356,6 +6133,7 @@ IF @ProductVersionMajor >= 10
 					        BEGIN
 						        IF @@VERSION NOT LIKE '%Microsoft SQL Server 2000%'
 							        AND @@VERSION NOT LIKE '%Microsoft SQL Server 2005%'
+									AND @SkipBlockingChecks = 0
 							        BEGIN
 								
 										IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 33) WITH NOWAIT;
@@ -5495,7 +6273,7 @@ IF @ProductVersionMajor >= 10
 		  INNER JOIN [?].sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
 		  INNER JOIN sys.databases sd ON sd.name = N''?''
 		  LEFT OUTER JOIN [?].sys.dm_db_index_usage_stats ius ON i.object_id = ius.object_id AND i.index_id = ius.index_id AND ius.database_id = sd.database_id
-		  WHERE i.type_desc = ''HEAP'' AND COALESCE(ius.user_seeks, ius.user_scans, ius.user_lookups, ius.user_updates) IS NOT NULL
+		  WHERE i.type_desc = ''HEAP'' AND COALESCE(NULLIF(ius.user_seeks,0), NULLIF(ius.user_scans,0), NULLIF(ius.user_lookups,0), NULLIF(ius.user_updates,0)) IS NOT NULL
 		  AND sd.name <> ''tempdb'' AND sd.name <> ''DWDiagnostics'' AND o.is_ms_shipped = 0 AND o.type <> ''S'' OPTION (RECOMPILE)';
 							END;
 
@@ -5519,7 +6297,7 @@ IF @ProductVersionMajor >= 10
 			Details)
 		  SELECT DISTINCT 164,
 		  N''?'',
-		  20,
+		  100,
 		  ''Reliability'',
 		  ''Plan Guides Failing'',
 		  ''https://BrentOzar.com/go/misguided'',
@@ -5555,7 +6333,7 @@ IF @ProductVersionMajor >= 10
 		  INNER JOIN [?].sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
 		  INNER JOIN sys.databases sd ON sd.name = N''?''
 		  LEFT OUTER JOIN [?].sys.dm_db_index_usage_stats ius ON i.object_id = ius.object_id AND i.index_id = ius.index_id AND ius.database_id = sd.database_id
-		  WHERE i.type_desc = ''HEAP'' AND COALESCE(ius.user_seeks, ius.user_scans, ius.user_lookups, ius.user_updates) IS NULL
+		  WHERE i.type_desc = ''HEAP'' AND COALESCE(NULLIF(ius.user_seeks,0), NULLIF(ius.user_scans,0), NULLIF(ius.user_lookups,0), NULLIF(ius.user_updates,0)) IS NULL
 		  AND sd.name <> ''tempdb'' AND sd.name <> ''DWDiagnostics'' AND o.is_ms_shipped = 0 AND o.type <> ''S'' OPTION (RECOMPILE)';
 							END;
 
@@ -6117,6 +6895,37 @@ IF @ProductVersionMajor >= 10
 					HAVING COUNT(1) > 0;';
 			END; --of Check 218.
 
+			/* Check 225 - Reliability - Resumable Index Operation Paused */
+			IF NOT EXISTS (
+					SELECT 1
+					FROM #SkipChecks
+					WHERE DatabaseName IS NULL
+						AND CheckID = 225
+					)
+                AND EXISTS (SELECT * FROM sys.all_objects WHERE name = 'index_resumable_operations')
+			BEGIN
+				IF @Debug IN (1,2)
+				BEGIN
+					RAISERROR ('Running CheckId [%d].',0,1,218) WITH NOWAIT;
+				END
+
+				EXECUTE sp_MSforeachdb 'USE [?];
+					SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                    INSERT INTO #BlitzResults (CheckID, DatabaseName, Priority, FindingsGroup, Finding, URL, Details)
+					SELECT 225 AS CheckID
+						,''?'' AS DatabaseName
+						,200 AS Priority
+						,''Reliability'' AS FindingsGroup
+						,''Resumable Index Operation Paused'' AS Finding
+						,''https://BrentOzar.com/go/resumable'' AS URL
+						,iro.state_desc + N'' since '' + CONVERT(NVARCHAR(50), last_pause_time, 120) + '', ''
+                            + CAST(iro.percent_complete AS NVARCHAR(20)) + ''% complete: ''
+                            + CAST(iro.sql_text AS NVARCHAR(1000)) AS Details
+					FROM sys.index_resumable_operations iro
+					JOIN sys.objects o ON iro.[object_id] = o.[object_id]
+					WHERE iro.state <> 0;';
+			END; --of Check 225.
+
 			--/* Check 220 - Statistics Without Histograms */
 			--IF NOT EXISTS (
 			--		SELECT 1
@@ -6675,7 +7484,7 @@ IF @ProductVersionMajor >= 10
 						(@@SERVERNAME IS NOT NULL
 						AND
 						/* not a named instance */
-						CHARINDEX('\',CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))) = 0
+						CHARINDEX(CHAR(92),CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))) = 0
 						AND
 						/* not clustered, when computername may be different than the servername */
 						SERVERPROPERTY('IsClustered') = 0
@@ -6926,7 +7735,7 @@ IF @ProductVersionMajor >= 10
 								)
 								SELECT  77 AS CheckID ,
 										dSnap.[name] AS DatabaseName ,
-										50 AS Priority ,
+										170 AS Priority ,
 										'Reliability' AS FindingsGroup ,
 										'Database Snapshot Online' AS Finding ,
 										'https://BrentOzar.com/go/snapshot' AS URL ,
@@ -7081,12 +7890,8 @@ IF @ProductVersionMajor >= 10
 							) AS [URL] ,
 							( CASE
 								WHEN [ohi].[host_platform] = 'Linux' THEN 'You''re running the ' + CAST([ohi].[host_distribution] AS VARCHAR(35)) + ' distribution of ' + CAST([ohi].[host_platform] AS VARCHAR(35)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
-								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] = '5' THEN 'You''re running a really old version: Windows 2000, version ' + CAST([ohi].[host_release] AS VARCHAR(5))
-								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] > '5' AND [ohi].[host_release] < '6' THEN 'You''re running a really old version: ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
-								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] >= '6' AND [ohi].[host_release] <= '6.1' THEN 'You''re running a pretty old version: Windows: ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
-								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] = '6.2' THEN 'You''re running a rather modern version of Windows: ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
-								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] = '6.3' THEN 'You''re running a pretty modern version of Windows: ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
-								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] > '6.3' THEN 'Hot dog! You''re living in the future! You''re running ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
+								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] = '5' THEN 'You''re running Windows 2000, version ' + CAST([ohi].[host_release] AS VARCHAR(5))
+								WHEN [ohi].[host_platform] = 'Windows' AND [ohi].[host_release] > '5' THEN 'You''re running ' + CAST([ohi].[host_distribution] AS VARCHAR(50)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
 								ELSE 'You''re running ' + CAST([ohi].[host_distribution] AS VARCHAR(35)) + ', version ' + CAST([ohi].[host_release] AS VARCHAR(5))
 								END
 							   ) AS [Details]
@@ -7119,13 +7924,12 @@ IF @ProductVersionMajor >= 10
 									'Windows Version' AS [Finding] ,
 									'https://en.wikipedia.org/wiki/List_of_Microsoft_Windows_versions' AS [URL] ,
 									( CASE
-										WHEN [owi].[windows_release] = '5' THEN 'You''re running a really old version: Windows 2000, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-										WHEN [owi].[windows_release] > '5' AND [owi].[windows_release] < '6' THEN 'You''re running a really old version: Windows Server 2003/2003R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-										WHEN [owi].[windows_release] >= '6' AND [owi].[windows_release] <= '6.1' THEN 'You''re running a pretty old version: Windows: Server 2008/2008R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-										WHEN [owi].[windows_release] = '6.2' THEN 'You''re running a rather modern version of Windows: Server 2012 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-										WHEN [owi].[windows_release] = '6.3' THEN 'You''re running a pretty modern version of Windows: Server 2012R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-										WHEN [owi].[windows_release] = '10.0' THEN 'You''re running a pretty modern version of Windows: Server 2016 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
-										ELSE 'Hot dog! You''re living in the future! You''re running version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										WHEN [owi].[windows_release] = '5' THEN 'You''re running Windows 2000, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										WHEN [owi].[windows_release] > '5' AND [owi].[windows_release] < '6' THEN 'You''re running Windows Server 2003/2003R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										WHEN [owi].[windows_release] >= '6' AND [owi].[windows_release] <= '6.1' THEN 'You''re running Windows Server 2008/2008R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										WHEN [owi].[windows_release] >= '6.2' AND [owi].[windows_release] <= '6.3' THEN 'You''re running Windows Server 2012/2012R2 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										WHEN [owi].[windows_release] = '10.0' THEN 'You''re running Windows Server 2016/2019 era, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
+										ELSE 'You''re running Windows Server, version ' + CAST([owi].[windows_release] AS VARCHAR(5))
 										END
 									   ) AS [Details]
 									 FROM [sys].[dm_os_windows_info] [owi];
@@ -7639,6 +8443,8 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 							             THEN 'balanced power mode -- Uh... you want your CPUs to run at full speed, right?'
 							             WHEN '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 							             THEN 'high performance power mode'
+							             WHEN 'e9a42b02-d5df-448d-aa00-03f14749eb61'
+							             THEN 'ultimate performance power mode'
 										 ELSE 'an unknown power mode.'
 							        END AS Details
 								
@@ -7862,6 +8668,46 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 								    
                                  END;
                             END;
+
+                        /* CheckID 232 - Server Info - Data Size */
+						IF NOT EXISTS ( SELECT  1
+										FROM    #SkipChecks
+										WHERE   DatabaseName IS NULL AND CheckID = 232 )
+							BEGIN
+								
+								IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 232) WITH NOWAIT;
+                                
+								IF OBJECT_ID('tempdb..#MasterFiles') IS NOT NULL
+									DROP TABLE #MasterFiles;
+								CREATE TABLE #MasterFiles (database_id INT, file_id INT, type_desc NVARCHAR(50), name NVARCHAR(255), physical_name NVARCHAR(255), size BIGINT);
+								/* Azure SQL Database doesn't have sys.master_files, so we have to build our own. */
+								IF ((SERVERPROPERTY('Edition')) = 'SQL Azure' 
+									 AND (OBJECT_ID('sys.master_files') IS NULL))
+									SET @StringToExecute = 'INSERT INTO #MasterFiles (database_id, file_id, type_desc, name, physical_name, size) SELECT DB_ID(), file_id, type_desc, name, physical_name, size FROM sys.database_files;';
+								ELSE
+									SET @StringToExecute = 'INSERT INTO #MasterFiles (database_id, file_id, type_desc, name, physical_name, size) SELECT database_id, file_id, type_desc, name, physical_name, size FROM sys.master_files;';
+								EXEC(@StringToExecute);
+
+
+								INSERT  INTO #BlitzResults
+								    	( CheckID ,
+								    		Priority ,
+								    		FindingsGroup ,
+								    		Finding ,
+											URL ,
+								    		Details
+								    	)
+								    	SELECT  232 AS CheckID
+								    			,250 AS Priority
+								    			,'Server Info' AS FindingsGroup
+								    			,'Data Size' AS Finding
+												,'' AS URL
+								    			,CAST(COUNT(DISTINCT database_id) AS NVARCHAR(100)) + N' databases, ' + CAST(CAST(SUM (CAST(size AS BIGINT)*8./1024./1024.) AS MONEY) AS VARCHAR(100)) + ' GB total file size' as Details
+										FROM #MasterFiles
+										WHERE database_id > 4;
+
+                            END;
+
 
 					END; /* IF @CheckServerInfo = 1 */
 			END; /* IF ( ( SERVERPROPERTY('ServerName') NOT IN ( SELECT ServerName */
@@ -8239,6 +9085,25 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 							  LEFT OUTER JOIN Results rNext ON r.rownum = rNext.rownum - 1
 							ORDER BY r.rownum FOR XML PATH(N'');
 						END;
+                    ELSE IF @OutputType = 'XML'
+                        BEGIN
+							/* --TOURSTOP05-- */
+							SELECT  [Priority] ,
+									[FindingsGroup] ,
+									[Finding] ,
+									[DatabaseName] ,
+									[URL] ,
+									[Details] ,
+									[QueryPlanFiltered] ,
+									CheckID
+							FROM    #BlitzResults
+							ORDER BY Priority ,
+									FindingsGroup ,
+									Finding ,
+									DatabaseName ,
+									Details
+                            FOR XML PATH('Result'), ROOT('sp_Blitz_Output');
+						END;
 					ELSE IF @OutputType <> 'NONE'
 						BEGIN
 							/* --TOURSTOP05-- */
@@ -8314,12 +9179,28 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 
 	END; /* ELSE -- IF @OutputType = 'SCHEMA' */
 
+    /*
+	   Cleanups - drop temporary tables that have been created by this SP.													 
+    */
+																 
+	IF(OBJECT_ID('tempdb..#InvalidLogins') IS NOT NULL)
+	BEGIN
+		EXEC sp_executesql N'DROP TABLE #InvalidLogins;';
+	END;
+
+	/*
+	Reset the Nmumeric_RoundAbort session state back to enabled if it was disabled earlier. 
+	See Github issue #2302 for more info.
+	*/
+	IF @NeedToTurnNumericRoundabortBackOn = 1
+		SET NUMERIC_ROUNDABORT ON;
+
     SET NOCOUNT OFF;
 GO
 
 /*
 --Sample execution call with the most common parameters:
-EXEC [dbo].[sp_Blitz]
+EXEC [dbo].[sp_Blitz] 
     @CheckUserDatabaseObjects = 1 ,
     @CheckProcedureCache = 0 ,
     @OutputType = 'TABLE' ,

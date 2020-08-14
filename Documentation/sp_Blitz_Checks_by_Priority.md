@@ -6,8 +6,8 @@ Before adding a new check, make sure to add a Github issue for it first, and hav
 
 If you want to change anything about a check - the priority, finding, URL, or ID - open a Github issue first. The relevant scripts have to be updated too.
 
-CURRENT HIGH CHECKID: 224.  
-If you want to add a new one, start at 225.
+CURRENT HIGH CHECKID: 234.
+If you want to add a new one, start at 235.
 
 | Priority | FindingsGroup | Finding | URL | CheckID |
 |----------|-----------------------------|---------------------------------------------------------|------------------------------------------------------------------------|----------|
@@ -24,6 +24,7 @@ If you want to add a new one, start at 225.
 | 1 | Corruption | Database Corruption Detected | https://www.BrentOzar.com/go/repair | 90 |
 | 1 | Performance | Memory Dangerously Low | https://www.BrentOzar.com/go/max | 51 |
 | 1 | Performance | Memory Dangerously Low in NUMA Nodes | https://www.BrentOzar.com/go/max | 159 |
+| 1 | Reliability | Evaluation Edition | https://www.BrentOzar.com/go/workgroup | 229 |
 | 1 | Reliability | Last good DBCC CHECKDB over 2 weeks old | https://www.BrentOzar.com/go/checkdb | 68 |
 | 5 | Monitoring | Disabled Internal Monitoring Features | https://msdn.microsoft.com/en-us/library/ms190737.aspx | 177 |
 | 5 | Reliability | Dangerous Third Party Modules | https://support.microsoft.com/en-us/kb/2033238 | 179 |
@@ -34,9 +35,10 @@ If you want to add a new one, start at 225.
 | 10 | Performance | Auto-Shrink Ran Recently| https://www.BrentOzar.com/go/autoshrink | 206 |
 | 10 | Performance | CPU Schedulers Offline | https://www.BrentOzar.com/go/schedulers | 101 |
 | 10 | Performance | CPU w/Odd Number of Cores | https://www.BrentOzar.com/go/oddity | 198 |
-| 10 | Performance | DBCC DROPCLEANBUFFERS Ran Recently | | 207 |
-| 10 | Performance | DBCC FREEPROCCACHE Ran Recently | | 208 |
-| 10 | Performance | DBCC SHRINK% Ran Recently | | 210 |
+| 10 | Performance | DBCC DROPCLEANBUFFERS Ran Recently | https://www.BrentOzar.com/go/dbcc | 207 |
+| 10 | Performance | DBCC FREEPROCCACHE Ran Recently | https://www.BrentOzar.com/go/dbcc | 208 |
+| 10 | Performance | DBCC SHRINK% Ran Recently | https://www.BrentOzar.com/go/dbcc | 210 |
+| 10 | Performance | DBCC WRITEPAGE Used Recently | https://www.BrentOzar.com/go/dbcc | 209 |
 | 10 | Performance | High Memory Use for In-Memory OLTP (Hekaton) | https://www.BrentOzar.com/go/hekaton | 145 |
 | 10 | Performance | Memory Nodes Offline | https://www.BrentOzar.com/go/schedulers | 110 |
 | 10 | Performance | Plan Cache Erased Recently | https://www.BrentOzar.com/askbrent/plan-cache-erased-recently/ | 125 |
@@ -46,26 +48,23 @@ If you want to add a new one, start at 225.
 | 20 | Reliability | Databases in Unusual States | https://www.BrentOzar.com/go/repair | 102 |
 | 20 | Reliability | Memory Dumps Have Occurred | https://www.BrentOzar.com/go/dump | 171 |
 | 20 | Reliability | No Failover Cluster Nodes Available | https://www.BrentOzar.com/go/node | 184 |
-| 20 | Reliability | Plan Guides Failing | https://www.BrentOzar.com/go/guides | 164 |
 | 20 | Reliability | Query Store Cleanup Disabled | https://www.BrentOzar.com/go/cleanup | 182 |
 | 20 | Reliability | Unsupported Build of SQL Server | https://www.BrentOzar.com/go/unsupported | 128 |
 | 20 | Reliability | User Databases on C Drive | https://www.BrentOzar.com/go/cdrive | 26 |
 | 20 | Reliability | TempDB on C Drive | https://www.BrentOzar.com/go/cdrive | 25 |
-| 50 | DBCC Events | Overall Events | | 203 |
+| 50 | DBCC Events | Overall Events | https://www.BrentOzar.com/go/dbcc | 203 |
 | 50 | Performance | File Growths Slow | https://www.BrentOzar.com/go/filegrowth | 151 |
 | 50 | Performance | Instant File Initialization Not Enabled | https://www.BrentOzar.com/go/instant | 192 |
+| 50 | Performance | Memory Leak in USERSTORE_TOKENPERM Cache | https://www.BrentOzar.com/go/userstore| 233 |
 | 50 | Performance | Poison Wait Detected | https://www.BrentOzar.com/go/poison | 107 |
 | 50 | Performance | Poison Wait Detected: CMEMTHREAD & NUMA | https://www.BrentOzar.com/go/poison | 162 |
 | 50 | Performance | Poison Wait Detected: Serializable Locking | https://www.BrentOzar.com/go/serializable | 121 |
 | 50 | Performance | Too Much Free Memory | https://www.BrentOzar.com/go/freememory | 165 |
 | 50 | Performance | Wait Stats Cleared Recently| | 205 |
-| 50 | Reliability | Database Snapshot Online | https://www.BrentOzar.com/go/snapshot | 77 |
-| 50 | Reliability | DBCC WRITEPAGE Used Recently | | 209 |
-| 50 | Reliability | Errors Logged Recently in the Default Trace | https://www.BrentOzar.com/go/defaulttrace | 150 |
+| 50 | Reliability | DBCC WRITEPAGE Used Recently | https://www.BrentOzar.com/go/dbcc | 209 |
 | 50 | Reliability | Full Text Indexes Not Updating | https://www.BrentOzar.com/go/fulltext | 113 |
 | 50 | Reliability | Page Verification Not Optimal | https://www.BrentOzar.com/go/torn | 14 |
 | 50 | Reliability | Possibly Broken Log Shipping | https://www.BrentOzar.com/go/shipping | 111 |
-| 50 | Reliability | Remote Admin Connections Disabled | https://www.BrentOzar.com/go/dac | 100 |
 | 50 | Reliability | TempDB File Error | https://www.BrentOzar.com/go/tempdboops | 191 |
 | 50 | Reliability | Transaction Log Larger than Data File | https://www.BrentOzar.com/go/biglog | 75 |
 | 50 | Reliability | Default Trace File Error | https://BrentOzar.com/go/defaulttrace | 199 |
@@ -90,6 +89,8 @@ If you want to add a new one, start at 225.
 | 100 | Performance | Unusual SQL Server Edition | https://www.BrentOzar.com/go/workgroup | 97 |
 | 100 | Performance | Implicit Transactions | https://www.brentozar.com/go/ImplicitTransactions/ | 215 |
 | 100 | Reliability | Cumulative Update Available | https://SQLServerUpdates.com | 217 |
+| 100 | Reliability | Plan Guides Failing | https://www.BrentOzar.com/go/guides | 164 |
+| 100 | Reliability | SQL Server Update May Fail | https://desertdba.com/failovers-cant-serve-two-masters/ | 234 |
 | 110 | Performance | Active Tables Without Clustered Indexes | https://www.BrentOzar.com/go/heaps | 38 |
 | 110 | Performance | Auto-Create Stats Disabled | https://www.BrentOzar.com/go/acs | 15 |
 | 110 | Performance | Auto-Update Stats Disabled | https://www.BrentOzar.com/go/aus | 16 |
@@ -127,7 +128,10 @@ If you want to add a new one, start at 225.
 | 170 | File Configuration | Uneven File Growth Settings in One Filegroup | https://www.BrentOzar.com/go/grow | 42 |
 | 170 | Reliability | Database Files on Network File Shares | https://www.BrentOzar.com/go/nas | 148 |
 | 170 | Reliability | Database Files Stored in Azure | https://www.BrentOzar.com/go/azurefiles | 149 |
+| 170 | Reliability | Database Snapshot Online | https://www.BrentOzar.com/go/snapshot | 77 |
+| 170 | Reliability | Errors Logged Recently in the Default Trace | https://www.BrentOzar.com/go/defaulttrace | 150 |
 | 170 | Reliability | Max File Size Set | https://www.BrentOzar.com/go/maxsize | 80 |
+| 170 | Reliability | Remote Admin Connections Disabled | https://www.BrentOzar.com/go/dac | 100 |
 | 200 | Backup | Backing Up Unneeded Database | https://www.BrentOzar.com/go/reportservertempdb | 127 |
 | 200 | Backup | MSDB Backup History Not Purged | https://www.BrentOzar.com/go/history | 3 |
 | 200 | Backup | MSDB Backup History Purged Too Frequently | https://www.BrentOzar.com/go/history | 186 |
@@ -242,6 +246,7 @@ If you want to add a new one, start at 225.
 | 200 | Performance | User-Created Statistics In Place | https://www.BrentOzar.com/go/userstats | 122 |
 | 200 | Performance | SSAS/SSIS/SSRS Installed | https://www.BrentOzar.com/go/services | 224 |
 | 200 | Reliability | Extended Stored Procedures in Master | https://www.BrentOzar.com/go/clr | 105 |
+| 200 | Reliability | Resumable Index Operation Paused | https://www.BrentOzar.com/go/resumable | 225 |
 | 200 | Surface Area | Endpoints Configured | https://www.BrentOzar.com/go/endpoints/ | 9 |
 | 210 | Non-Default Database Config | ANSI NULL Default Enabled | https://www.BrentOzar.com/go/dbdefaults | 135 |
 | 210 | Non-Default Database Config | Auto Create Stats Incremental Enabled | https://www.BrentOzar.com/go/dbdefaults | 134 |
@@ -257,6 +262,8 @@ If you want to add a new one, start at 225.
 | 210 | Non-Default Database Config | Supplemental Logging Enabled | https://www.BrentOzar.com/go/dbdefaults | 131 |
 | 210 | Non-Default Database Config | Target Recovery Time Changed | https://www.BrentOzar.com/go/dbdefaults | 142 |
 | 210 | Non-Default Database Config | Trustworthy Enabled | https://www.BrentOzar.com/go/dbdefaults | 137 |
+| 210 | Non-Default Database Config | Broker Enabled | https://www.BrentOzar.com/go/dbdefaults | 230 |
+| 210 | Non-Default Database Config | Honor Broker Priority Enabled | https://www.BrentOzar.com/go/dbdefaults | 231 |
 | 210 | Non-Default Database Scoped Config | MAXDOP | https://www.BrentOzar.com/go/dbscope | 194 |
 | 210 | Non-Default Database Scoped Config | Legacy CE | https://www.BrentOzar.com/go/dbscope | 195 |
 | 210 | Non-Default Database Scoped Config | Parameter Sniffing | https://www.BrentOzar.com/go/dbscope | 196 |
@@ -272,6 +279,7 @@ If you want to add a new one, start at 225.
 | 230 | Security | SQL Agent Job Runs at Startup | https://www.BrentOzar.com/go/startup | 57 |
 | 230 | Security | Stored Procedure Runs at Startup | https://www.BrentOzar.com/go/startup | 7 |
 | 230 | Security | Sysadmins | https://www.BrentOzar.com/go/sa | 4 |
+| 230 | Security | Invalid Active Directory Accounts | | 2301|
 | 240 | Wait Stats | No Significant Waits Detected | https://www.BrentOzar.com/go/waits | 153 |
 | 240 | Wait Stats | Top Wait Stats | https://www.BrentOzar.com/go/waits | 152 |
 | 240 | Wait Stats | Wait Stats Have Been Cleared | https://www.BrentOzar.com/go/waits | 185 |
@@ -280,6 +288,7 @@ If you want to add a new one, start at 225.
 | 250 | Server Info | Agent is Currently Offline |  | 167 |
 | 250 | Server Info | Azure Managed Instance | https://www.BrenOzar.com/go/azurevm | 222 |
 | 250 | Server Info | Container | https://www.BrentOzar.com/go/virtual | 214 |
+| 250 | Server Info | Data Size |  | 232 |
 | 250 | Server Info | Default Trace Contents | https://www.BrentOzar.com/go/trace | 106 |
 | 250 | Server Info | Drive Space |  | 92 |
 | 250 | Server Info | Full-text Filter Daemon is Currently Offline |  | 168 |
@@ -296,5 +305,8 @@ If you want to add a new one, start at 225.
 | 250 | Server Info | Windows Version |  | 172 |
 | 250 | Server Info | Power Plan |  | 211 |
 | 250 | Server Info | Stacked Instances | https://www.brentozar.com/go/babygotstacked/ | 212 |
+| 253 | First Responder Kit | Version Check Failed | http://FirstResponderKit.org | 226 |
+| 253 | First Responder Kit | Component Missing | http://FirstResponderKit.org | 227 |
+| 253 | First Responder Kit | Component Outdated | http://FirstResponderKit.org | 228 |
 | 254 | Rundate | (Current Date) |  | 156 |
 | 255 | Thanks! | From Your Community Volunteers |  | -1 |

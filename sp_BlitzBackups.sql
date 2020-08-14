@@ -23,16 +23,12 @@ AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	
-	SET @Version = '3.3';
-	SET @VersionDate = '20190219';
+	SELECT @Version = '3.98', @VersionDate = '20200808';
 	
 	IF(@VersionCheckMode = 1)
 	BEGIN
 		RETURN;
 	END;
-	DECLARE @Version VARCHAR(30);
-	SET @Version = '3.2';
-	SET @VersionDate = '20190128';
 
 	IF @Help = 1 PRINT '
 	/*
@@ -74,7 +70,7 @@ AS
 
     MIT License
 	
-	Copyright (c) 2019 Brent Ozar Unlimited
+	Copyright (c) 2020 Brent Ozar Unlimited
 
 	Permission is hereby granted, free of charge, to any person obtaining a copy
 	of this software and associated documentation files (the "Software"), to deal

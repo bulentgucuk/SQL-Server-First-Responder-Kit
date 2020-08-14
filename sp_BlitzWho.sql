@@ -19,6 +19,7 @@ ALTER PROCEDURE dbo.sp_BlitzWho
 	@MinTempdbMB INT = 0 ,
 	@MinRequestedMemoryKB INT = 0 ,
 	@MinBlockingSeconds INT = 0 ,
+	@CheckDateOverride DATETIMEOFFSET = NULL,
 	@Version     VARCHAR(30) = NULL OUTPUT,
 	@VersionDate DATETIME = NULL OUTPUT,
     @VersionCheckMode BIT = 0
@@ -27,16 +28,13 @@ BEGIN
 	SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	
-	SET @Version = '7.3';
-	SET @VersionDate = '20190219';
+	SELECT @Version = '7.98', @VersionDate = '20200808';
     
 	IF(@VersionCheckMode = 1)
 	BEGIN
 		RETURN;
 	END;
-	DECLARE @Version VARCHAR(30);
-	SET @Version = '7.2';
-	SET @VersionDate = '20190128';
+
 
 
 	IF @Help = 1
@@ -57,7 +55,7 @@ Known limitations of this version:
    
 MIT License
 
-Copyright (c) 2019 Brent Ozar Unlimited
+Copyright (c) 2020 Brent Ozar Unlimited
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -82,6 +80,7 @@ SOFTWARE.
 DECLARE  @ProductVersion NVARCHAR(128)
 		,@ProductVersionMajor DECIMAL(10,2)
 		,@ProductVersionMinor DECIMAL(10,2)
+		,@Platform NVARCHAR(8) /* Azure or NonAzure are acceptable */ = (SELECT CASE WHEN @@VERSION LIKE '%Azure%' THEN N'Azure' ELSE N'NonAzure' END AS [Platform])
 		,@EnhanceFlag BIT = 0
 		,@BlockingCheck NVARCHAR(MAX)
 		,@StringToSelect NVARCHAR(MAX)
@@ -110,6 +109,7 @@ DECLARE  @ProductVersion NVARCHAR(128)
 						  AND r.statement_end_offset = session_stats.statement_end_offset' 
 		,@QueryStatsXMLselect NVARCHAR(MAX) = N' CAST(COALESCE(qs_live.query_plan, ''<?No live query plan available. To turn on live plans, see https://www.BrentOzar.com/go/liveplans ?>'') AS XML) AS live_query_plan , ' 
 		,@QueryStatsXMLSQL NVARCHAR(MAX) = N'OUTER APPLY sys.dm_exec_query_statistics_xml(s.session_id) qs_live' 
+		,@ObjectFullName NVARCHAR(2000);
 
 
 SET @ProductVersion = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128));
@@ -152,7 +152,8 @@ IF @OutputDatabaseName IS NOT NULL AND @OutputSchemaName IS NOT NULL AND @Output
 	  + @OutputTableName + N''') CREATE TABLE '
 	  + @OutputSchemaName + N'.'
 	  + @OutputTableName
-	  + N'(
+	  + N'(';
+	SET @StringToExecute = @StringToExecute + N'
 	ID INT IDENTITY(1,1) NOT NULL,
 	ServerName NVARCHAR(128) NOT NULL,
 	CheckDate DATETIMEOFFSET NOT NULL,
@@ -244,12 +245,20 @@ IF @OutputDatabaseName IS NOT NULL AND @OutputSchemaName IS NOT NULL AND @Output
 	[plan_handle] [varbinary] (64) NULL,
 	[statement_start_offset] INT NULL,
 	[statement_end_offset] INT NULL,
+	JoinKey AS ServerName + CAST(CheckDate AS NVARCHAR(50)),
 	PRIMARY KEY CLUSTERED (ID ASC));';
 	IF @Debug = 1
 		BEGIN
 			PRINT CONVERT(VARCHAR(8000), SUBSTRING(@StringToExecute, 0, 8000))
 			PRINT CONVERT(VARCHAR(8000), SUBSTRING(@StringToExecute, 8000, 16000))
 		END
+	EXEC(@StringToExecute);
+
+	/* If the table doesn't have the new JoinKey computed column, add it. See Github #2162. */
+	SET @ObjectFullName = @OutputDatabaseName + N'.' + @OutputSchemaName + N'.' +  @OutputTableName;
+	SET @StringToExecute = N'IF NOT EXISTS (SELECT * FROM ' + @OutputDatabaseName + N'.sys.all_columns 
+		WHERE object_id = (OBJECT_ID(''' + @ObjectFullName + N''')) AND name = ''JoinKey'')
+		ALTER TABLE ' + @ObjectFullName + N' ADD JoinKey AS ServerName + CAST(CheckDate AS NVARCHAR(50));';
 	EXEC(@StringToExecute);
 
 	/* Delete history older than @OutputTableRetentionDays */
@@ -303,11 +312,7 @@ BEGIN
     /* Think of the StringToExecute as starting with this, but we'll set this up later depending on whether we're doing an insert or a select:
     SELECT @StringToExecute = N'SELECT  GETDATE() AS run_date ,
     */
-    SET @StringToExecute = N'COALESCE(
-							    CONVERT(VARCHAR(20), (ABS(r.total_elapsed_time) / 1000) / 86400) + '':'' + CONVERT(VARCHAR(20), DATEADD(SECOND, (r.total_elapsed_time / 1000), 0), 114) ,
-							    CONVERT(VARCHAR(20), DATEDIFF(SECOND, s.last_request_start_time, GETDATE()) / 86400) + '':''
-								    + CONVERT(VARCHAR(20), DATEADD(SECOND,  DATEDIFF(SECOND, s.last_request_start_time, GETDATE()), 0), 114)
-								    ) AS [elapsed_time] ,
+    SET @StringToExecute = N'COALESCE( CONVERT(VARCHAR(20), (ABS(r.total_elapsed_time) / 1000) / 86400) + '':'' + CONVERT(VARCHAR(20), (DATEADD(SECOND, (r.total_elapsed_time / 1000), 0) + DATEADD(MILLISECOND, (r.total_elapsed_time % 1000), 0)), 114), CONVERT(VARCHAR(20), DATEDIFF(SECOND, s.last_request_start_time, GETDATE()) / 86400) + '':'' + CONVERT(VARCHAR(20), DATEADD(SECOND, DATEDIFF(SECOND, s.last_request_start_time, GETDATE()), 0), 114) ) AS [elapsed_time] ,
 			       s.session_id ,
 						    COALESCE(DB_NAME(r.database_id), DB_NAME(blocked.dbid), ''N/A'') AS database_name,
 			       ISNULL(SUBSTRING(dest.text,
@@ -320,14 +325,20 @@ BEGIN
 			       derp.query_plan ,
 						    qmg.query_cost ,										   		   
 						    s.status ,
-			       COALESCE(wt.wait_info, RTRIM(blocked.lastwaittype) + '' ('' + CONVERT(VARCHAR(10), 
-						    blocked.waittime) + '')'' ) AS wait_info ,											
+							CASE
+								WHEN s.status <> ''sleeping'' THEN COALESCE(wt.wait_info, RTRIM(blocked.lastwaittype) + '' ('' + CONVERT(VARCHAR(10), blocked.waittime) + '')'' ) 
+								ELSE NULL
+							END AS wait_info ,																					
 						    CASE WHEN r.blocking_session_id <> 0 AND blocked.session_id IS NULL 
-							     THEN r.blocking_session_id
-							     WHEN r.blocking_session_id <> 0 AND s.session_id <> blocked.blocking_session_id 
-							     THEN blocked.blocking_session_id
-							    ELSE NULL 
-						    END AS blocking_session_id , 
+							       THEN r.blocking_session_id
+							       WHEN r.blocking_session_id <> 0 AND s.session_id <> blocked.blocking_session_id 
+							       THEN blocked.blocking_session_id
+								   WHEN r.blocking_session_id = 0 AND s.session_id = blocked.session_id 
+								   THEN blocked.blocking_session_id
+								   WHEN r.blocking_session_id <> 0 AND s.session_id = blocked.blocking_session_id 
+							       THEN r.blocking_session_id
+							       ELSE NULL 
+						      END AS blocking_session_id,
 			       COALESCE(r.open_transaction_count, blocked.open_tran) AS open_transaction_count ,
 						    CASE WHEN EXISTS (  SELECT 1 
                FROM sys.dm_tran_active_transactions AS tat
@@ -341,9 +352,19 @@ BEGIN
 					     s.nt_domain ,
 			       s.host_name ,
 			       s.login_name ,
-			       s.nt_user_name ,
-			       s.program_name
-						    '
+			       s.nt_user_name ,'
+		IF @Platform = 'NonAzure'
+		BEGIN
+		SET @StringToExecute +=
+				   N'program_name = COALESCE((
+					SELECT REPLACE(program_name,Substring(program_name,30,34),''"''+j.name+''"'') 
+					FROM msdb.dbo.sysjobs j WHERE Substring(program_name,32,32) = CONVERT(char(32),CAST(j.job_id AS binary(16)),2)
+					),s.program_name)'
+		END
+		ELSE
+		BEGIN
+		SET @StringToExecute += N's.program_name'
+		END
 						
     IF @ExpertMode = 1
     BEGIN
@@ -496,11 +517,7 @@ IF @ProductVersionMajor >= 11
     /* Think of the StringToExecute as starting with this, but we'll set this up later depending on whether we're doing an insert or a select:
     SELECT @StringToExecute = N'SELECT  GETDATE() AS run_date ,
     */
-    SELECT @StringToExecute = N' COALESCE(
-							    CONVERT(VARCHAR(20), (ABS(r.total_elapsed_time) / 1000) / 86400) + '':'' + CONVERT(VARCHAR(20), DATEADD(SECOND, (r.total_elapsed_time / 1000), 0), 114) ,
-							    CONVERT(VARCHAR(20), DATEDIFF(SECOND, s.last_request_start_time, GETDATE()) / 86400) + '':''
-								    + CONVERT(VARCHAR(20), DATEADD(SECOND,  DATEDIFF(SECOND, s.last_request_start_time, GETDATE()), 0), 114)
-								    ) AS [elapsed_time] ,
+    SELECT @StringToExecute = N'COALESCE( CONVERT(VARCHAR(20), (ABS(r.total_elapsed_time) / 1000) / 86400) + '':'' + CONVERT(VARCHAR(20), (DATEADD(SECOND, (r.total_elapsed_time / 1000), 0) + DATEADD(MILLISECOND, (r.total_elapsed_time % 1000), 0)), 114), CONVERT(VARCHAR(20), DATEDIFF(SECOND, s.last_request_start_time, GETDATE()) / 86400) + '':'' + CONVERT(VARCHAR(20), DATEADD(SECOND, DATEDIFF(SECOND, s.last_request_start_time, GETDATE()), 0), 114) ) AS [elapsed_time] ,
 			       s.session_id ,
 						    COALESCE(DB_NAME(r.database_id), DB_NAME(blocked.dbid), ''N/A'') AS database_name,
 			       ISNULL(SUBSTRING(dest.text,
@@ -515,7 +532,10 @@ IF @ProductVersionMajor >= 11
 						    +' 
 			       qmg.query_cost ,
 			       s.status ,
-			       COALESCE(wt.wait_info, RTRIM(blocked.lastwaittype) + '' ('' + CONVERT(VARCHAR(10), blocked.waittime) + '')'' ) AS wait_info ,'
+					CASE
+						WHEN s.status <> ''sleeping'' THEN COALESCE(wt.wait_info, RTRIM(blocked.lastwaittype) + '' ('' + CONVERT(VARCHAR(10), blocked.waittime) + '')'' ) 
+						ELSE NULL
+					END AS wait_info ,'
 						    +
 						    CASE @SessionWaits
 							     WHEN 1 THEN + N'SUBSTRING(wt2.session_wait_info, 0, LEN(wt2.session_wait_info) ) AS top_session_waits ,'
@@ -526,6 +546,10 @@ IF @ProductVersionMajor >= 11
 							       THEN r.blocking_session_id
 							       WHEN r.blocking_session_id <> 0 AND s.session_id <> blocked.blocking_session_id 
 							       THEN blocked.blocking_session_id
+								   WHEN r.blocking_session_id = 0 AND s.session_id = blocked.session_id 
+								   THEN blocked.blocking_session_id
+								   WHEN r.blocking_session_id <> 0 AND s.session_id = blocked.blocking_session_id 
+							       THEN r.blocking_session_id
 							       ELSE NULL 
 						      END AS blocking_session_id,
 			       COALESCE(r.open_transaction_count, blocked.open_tran) AS open_transaction_count ,
@@ -541,9 +565,20 @@ IF @ProductVersionMajor >= 11
 					     s.nt_domain ,
 			       s.host_name ,
 			       s.login_name ,
-			       s.nt_user_name ,
-			       s.program_name 
-						    '	   
+			       s.nt_user_name ,'
+		IF @Platform = 'NonAzure'
+		BEGIN
+		SET @StringToExecute +=
+				   N'program_name = COALESCE((
+					SELECT REPLACE(program_name,Substring(program_name,30,34),''"''+j.name+''"'') 
+					FROM msdb.dbo.sysjobs j WHERE Substring(program_name,32,32) = CONVERT(char(32),CAST(j.job_id AS binary(16)),2)
+					),s.program_name)'
+		END
+		ELSE
+		BEGIN
+		SET @StringToExecute += N's.program_name'
+		END
+
     IF @ExpertMode = 1 /* We show more columns in expert mode, so the SELECT gets longer */
     BEGIN
         SET @StringToExecute += 						
@@ -756,7 +791,7 @@ IF (@MinElapsedSeconds + @MinCPUTime + @MinLogicalReads + @MinPhysicalReads + @M
 	END
 
 SET @StringToExecute += 	
-	N' ORDER BY 2 DESC;
+	N' ORDER BY 2 DESC
 	';
 
 
@@ -864,11 +899,31 @@ IF @OutputDatabaseName IS NOT NULL AND @OutputSchemaName IS NOT NULL AND @Output
 	,[statement_start_offset]
 	,[statement_end_offset]' ELSE N'' END + N'
 ) 
-	SELECT @@SERVERNAME, SYSDATETIMEOFFSET() AS CheckDate , '
+	SELECT @@SERVERNAME, COALESCE(@CheckDateOverride, SYSDATETIMEOFFSET()) AS CheckDate , '
 	+ @StringToExecute;
 	END
 ELSE
 	SET @StringToExecute = @BlockingCheck + N' SELECT  GETDATE() AS run_date , ' + @StringToExecute;
+
+/* If the server has > 50GB of memory, add a max grant hint to avoid getting a giant grant */
+IF (@ProductVersionMajor = 11 AND @ProductVersionMinor >= 6020)
+	OR (@ProductVersionMajor = 12 AND @ProductVersionMinor >= 5000 )
+	OR (@ProductVersionMajor >= 13 )
+	AND 50000000 < (SELECT cntr_value 			
+						FROM sys.dm_os_performance_counters 
+						WHERE object_name LIKE '%:Memory Manager%'
+						AND counter_name LIKE 'Target Server Memory (KB)%')
+	BEGIN
+		SET @StringToExecute = @StringToExecute + N' OPTION (MAX_GRANT_PERCENT = 1, RECOMPILE) ';
+	END
+ELSE
+	BEGIN
+		SET @StringToExecute = @StringToExecute + N' OPTION (RECOMPILE) ';
+	END
+
+/* Be good: */
+SET @StringToExecute = @StringToExecute + N' ; ';
+
 
 IF @Debug = 1
 	BEGIN
@@ -876,7 +931,9 @@ IF @Debug = 1
 		PRINT CONVERT(VARCHAR(8000), SUBSTRING(@StringToExecute, 8000, 16000))
 	END
 
-EXEC(@StringToExecute);
+EXEC sp_executesql @StringToExecute,
+	N'@CheckDateOverride DATETIMEOFFSET',
+	@CheckDateOverride;
 
 END
 GO 
