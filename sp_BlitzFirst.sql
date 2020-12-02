@@ -45,7 +45,7 @@ BEGIN
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT @Version = '7.99', @VersionDate = '20200913';
+SELECT @Version = '7.9999', @VersionDate = '20201114';
 
 IF(@VersionCheckMode = 1)
 BEGIN
@@ -509,7 +509,7 @@ BEGIN
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('FT_COMPROWSET_RWLOCK','Full Text Search',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('FT_IFTS_RWLOCK','Full Text Search',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('FT_IFTS_SCHEDULER_IDLE_WAIT','Idle',1);
-			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('FT_IFTSHC_MUTEX','Full Text Search',0);
+			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('FT_IFTSHC_MUTEX','Full Text Search',1);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('FT_IFTSISM_MUTEX','Full Text Search',1);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('FT_MASTER_MERGE','Full Text Search',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('FT_MASTER_MERGE_COORDINATOR','Full Text Search',0);
@@ -1321,12 +1321,12 @@ BEGIN
 		       CASE @Seconds WHEN 0 THEN 0 ELSE SUM(os.waiting_tasks_count) OVER (PARTITION BY os.wait_type) END AS sum_waiting_tasks
 		   FROM sys.dm_os_wait_stats os
 		) x
-		   WHERE EXISTS 
+		   WHERE NOT EXISTS 
 		   (
-                SELECT 1/0
+                SELECT *
 				FROM ##WaitCategories AS wc
 				WHERE wc.WaitType = x.wait_type
-				AND wc.Ignorable = 0
+				AND wc.Ignorable = 1
 		   )
 		GROUP BY x.Pass, x.SampleTime, x.wait_type
 		ORDER BY sum_wait_time_ms DESC;
@@ -1454,8 +1454,8 @@ BEGIN
     AND     l.request_mode = N'S'
     AND    l.request_status = N'GRANT'
     AND    l.request_owner_type = N'SHARED_TRANSACTION_WORKSPACE') AS db ON s.session_id = db.request_session_id
-    CROSS APPLY sys.dm_exec_query_plan(r.plan_handle) pl
-    CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
+    OUTER APPLY sys.dm_exec_query_plan(r.plan_handle) pl
+    OUTER APPLY sys.dm_exec_sql_text(r.sql_handle) AS t
     WHERE r.command LIKE 'DBCC%'
 	AND CAST(t.text AS NVARCHAR(4000)) NOT LIKE '%dm_db_index_physical_stats%'
 	AND CAST(t.text AS NVARCHAR(4000)) NOT LIKE '%ALTER INDEX%'
@@ -2276,12 +2276,12 @@ If one of them is a lead blocker, consider killing that query.'' AS HowToStopit,
 			   SUM(os.waiting_tasks_count) OVER (PARTITION BY os.wait_type) AS sum_waiting_tasks
 		   FROM sys.dm_os_wait_stats os
 		) x
-		   WHERE EXISTS 
+		   WHERE NOT EXISTS 
 		   (
-                SELECT 1/0
+                SELECT *
 				FROM ##WaitCategories AS wc
 				WHERE wc.WaitType = x.wait_type
-				AND wc.Ignorable = 0
+				AND wc.Ignorable = 1
 		   )
 		GROUP BY x.Pass, x.SampleTime, x.wait_type
 		ORDER BY sum_wait_time_ms DESC;
@@ -3158,7 +3158,7 @@ If one of them is a lead blocker, consider killing that query.'' AS HowToStopit,
             + @OutputSchemaName + '.'
             + @OutputTableName
             + ' (ServerName, CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt, QueryHash) SELECT '
-            + ' @SrvName, @CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt, QueryHash FROM #BlitzFirstResults ORDER BY Priority , FindingsGroup , Finding , Details';
+            + ' @SrvName, @CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, LEFT(Details,4000), HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt, QueryHash FROM #BlitzFirstResults ORDER BY Priority , FindingsGroup , Finding , Details';
 		
 		EXEC sp_executesql @StringToExecute,
 			N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset',
@@ -3213,7 +3213,7 @@ If one of them is a lead blocker, consider killing that query.'' AS HowToStopit,
             + ' INSERT '
             + @OutputTableName
             + ' (ServerName, CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt) SELECT '
-            + ' @SrvName, @CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt FROM #BlitzFirstResults ORDER BY Priority , FindingsGroup , Finding , Details';
+            + ' @SrvName, @CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, LEFT(Details,4000), HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt FROM #BlitzFirstResults ORDER BY Priority , FindingsGroup , Finding , Details';
 		
 		EXEC sp_executesql @StringToExecute,
 			N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset',
@@ -4258,13 +4258,14 @@ If one of them is a lead blocker, consider killing that query.'' AS HowToStopit,
                   AND wd1.FileID = wd2.FileID
             )
             SELECT
-                Pattern, [Sample Time], [Sample (seconds)], [File Name], [Drive],  [# Reads/Writes],[MB Read/Written],[Avg Stall (ms)], [file physical name]
+                Pattern, [Sample Time], [Sample (seconds)], [File Name], [Drive],  [# Reads/Writes],[MB Read/Written],[Avg Stall (ms)], [file physical name], [StallRank]
             FROM readstats
-            WHERE StallRank <=5 AND [MB Read/Written] > 0
+            WHERE StallRank <=20 AND [MB Read/Written] > 0
             UNION ALL
-            SELECT Pattern, [Sample Time], [Sample (seconds)], [File Name], [Drive],  [# Reads/Writes],[MB Read/Written],[Avg Stall (ms)], [file physical name]
+            SELECT Pattern, [Sample Time], [Sample (seconds)], [File Name], [Drive],  [# Reads/Writes],[MB Read/Written],[Avg Stall (ms)], [file physical name], [StallRank]
             FROM writestats
-            WHERE StallRank <=5 AND [MB Read/Written] > 0;
+            WHERE StallRank <=20 AND [MB Read/Written] > 0
+            ORDER BY Pattern, StallRank;
 
 
             -------------------------
