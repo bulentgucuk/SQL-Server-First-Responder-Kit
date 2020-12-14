@@ -6,8 +6,8 @@ Before adding a new check, make sure to add a Github issue for it first, and hav
 
 If you want to change anything about a check - the priority, finding, URL, or ID - open a Github issue first. The relevant scripts have to be updated too.
 
-CURRENT HIGH CHECKID: 45
-If you want to add a new check, start at 46
+CURRENT HIGH CHECKID: 46
+If you want to add a new check, start at 47
 
 | Priority | FindingsGroup | Finding | URL | CheckID |
 |----------|---------------------------------|---------------------------------------|-------------------------------------------------|----------|
@@ -25,6 +25,7 @@ If you want to add a new check, start at 46
 | 1 | SQL Server Internal Maintenance | Log File Shrinking | https://BrentOzar.com/go/logsize | 14 |
 | 10 | Server Performance | Poison Wait Detected | https://BrentOzar.com/go/poison | 30 |
 | 10 | Server Performance | Target Memory Lower Than Max | https://BrentOzar.com/go/target | 35 |
+| 10 | Azure Performance | Database is Maxed Out | https://BrentOzar.com/go/maxedout | 41 |
 | 40 | Table Problems | Forwarded Fetches/Sec High | https://BrentOzar.com/go/fetch | 29 |
 | 50 | In-Memory OLTP | Garbage Collection in Progress | https://BrentOzar.com/go/garbage | 31 |
 | 50 | Query Problems | Compilations/Sec High | https://BrentOzar.com/go/compile | 15 |
@@ -43,6 +44,7 @@ If you want to add a new check, start at 46
 | 100 | Query Problems | Suboptimal Plans/Sec High | https://BrentOzar.com/go/suboptimal | 33 |
 | 100 | Query Problems | Bad Estimates | https://brentozar.com/go/skewedup | 42 |
 | 100 | Query Problems | Skewed Parallelism | https://brentozar.com/go/skewedup | 43 |
+| 100 | Query Problems | Query with a memory grant exceeding @MemoryGrantThresholdPct | https://www.brentozar.com/memory-grants-sql-servers-public-toilet/ | 46 |
 | 200 | Wait Stats | (One per wait type) | https://BrentOzar.com/sql/wait-stats/#(waittype) | 6 |
 | 210 | Query Stats | Plan Cache Analysis Skipped | https://BrentOzar.com/go/topqueries | 18 |
 | 210 | Query Stats | Top Resource-Intensive Queries | https://BrentOzar.com/go/topqueries | 17 |
