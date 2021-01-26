@@ -37,7 +37,7 @@ AS
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	
 
-	SELECT @Version = '7.99999', @VersionDate = '20201211';
+	SELECT @Version = '8.0', @VersionDate = '20210117';
 	SET @OutputType = UPPER(@OutputType);
 
     IF(@VersionCheckMode = 1)
@@ -45,7 +45,9 @@ AS
 		RETURN;
 	END;
 
-	IF @Help = 1 PRINT '
+	IF @Help = 1 
+	BEGIN
+	PRINT '
 	/*
 	sp_Blitz from http://FirstResponderKit.org
 	
@@ -90,9 +92,9 @@ AS
 	tigertoolbox and are provided under the MIT license:
 	https://github.com/Microsoft/tigertoolbox
 	
-	All other copyrights for sp_Blitz are held by Brent Ozar Unlimited, 2020.
+	All other copyrights for sp_Blitz are held by Brent Ozar Unlimited, 2021.
 
-	Copyright (c) 2020 Brent Ozar Unlimited
+	Copyright (c) 2021 Brent Ozar Unlimited
 
 	Permission is hereby granted, free of charge, to any person obtaining a copy
 	of this software and associated documentation files (the "Software"), to deal
@@ -113,6 +115,9 @@ AS
 	SOFTWARE.
 
 	*/';
+	RETURN;
+	END;    /* @Help = 1 */
+
 	ELSE IF @OutputType = 'SCHEMA'
 	BEGIN
 		SELECT FieldList = '[Priority] TINYINT, [FindingsGroup] VARCHAR(50), [Finding] VARCHAR(200), [DatabaseName] NVARCHAR(128), [URL] VARCHAR(200), [Details] NVARCHAR(4000), [QueryPlan] NVARCHAR(MAX), [QueryPlanFiltered] NVARCHAR(MAX), [CheckID] INT';
@@ -1665,6 +1670,7 @@ AS
 										  + '] has auto-shrink enabled.  This setting can dramatically decrease performance.' ) AS Details
 								FROM    sys.databases
 								WHERE   is_auto_shrink_on = 1
+										AND state <> 6 /* Offline */
 										AND name NOT IN ( SELECT DISTINCT
 																  DatabaseName
 														  FROM    #SkipChecks
@@ -1698,7 +1704,7 @@ AS
 					  FROM sys.databases
 					  WHERE page_verify_option < 2
 					  AND name <> ''tempdb''
-					  AND state <> 1 /* Restoring */
+					  AND state NOT IN (1, 6) /* Restoring, Offline */
 					  and name not in (select distinct DatabaseName from #SkipChecks WHERE CheckID IS NULL OR CheckID = 14) OPTION (RECOMPILE);';
 								
 								IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;
@@ -7735,21 +7741,29 @@ IF @ProductVersionMajor >= 10
 								SELECT  74 AS CheckID ,
 										200 AS Priority ,
 										'Informational' AS FindingsGroup ,
-										'TraceFlag On' AS Finding ,
+										'Trace Flag On' AS Finding ,
 										CASE WHEN [T].[TraceFlag] = '834'  AND @ColumnStoreIndexesInUse = 1 THEN 'https://support.microsoft.com/en-us/kb/3210239'
 											 ELSE'https://www.BrentOzar.com/go/traceflags/' END AS URL ,
 										'Trace flag ' +
-										CASE WHEN [T].[TraceFlag] = '2330' THEN ' 2330 enabled globally. Using this trace Flag disables missing index requests!'
-											 WHEN [T].[TraceFlag] = '1211' THEN ' 1211 enabled globally. Using this Trace Flag disables lock escalation when you least expect it. No Bueno!'
-											 WHEN [T].[TraceFlag] = '1224' THEN ' 1224 enabled globally. Using this Trace Flag disables lock escalation based on the number of locks being taken. You shouldn''t have done that, Dave.'
-											 WHEN [T].[TraceFlag] = '652'  THEN ' 652 enabled globally. Using this Trace Flag disables pre-fetching during index scans. If you hate slow queries, you should turn that off.'
-											 WHEN [T].[TraceFlag] = '661'  THEN ' 661 enabled globally. Using this Trace Flag disables ghost record removal. Who you gonna call? No one, turn that thing off.'
-											 WHEN [T].[TraceFlag] = '1806'  THEN ' 1806 enabled globally. Using this Trace Flag disables Instant File Initialization. I question your sanity.'
-											 WHEN [T].[TraceFlag] = '3505'  THEN ' 3505 enabled globally. Using this Trace Flag disables Checkpoints. Probably not the wisest idea.'
-											 WHEN [T].[TraceFlag] = '8649'  THEN ' 8649 enabled globally. Using this Trace Flag drops cost threshold for parallelism down to 0. I hope this is a dev server.'
-										     WHEN [T].[TraceFlag] = '834' AND @ColumnStoreIndexesInUse = 1 THEN ' 834 is enabled globally. Using this Trace Flag with Columnstore Indexes is not a great idea.'
-											 WHEN [T].[TraceFlag] = '8017' AND (CAST(SERVERPROPERTY('Edition') AS NVARCHAR(1000)) LIKE N'%Express%') THEN ' 8017 is enabled globally, which is the default for express edition.'
-                                             WHEN [T].[TraceFlag] = '8017' AND (CAST(SERVERPROPERTY('Edition') AS NVARCHAR(1000)) NOT LIKE N'%Express%') THEN ' 8017 is enabled globally. Using this Trace Flag disables creation schedulers for all logical processors. Not good.'
+										CASE WHEN [T].[TraceFlag] = '652'  THEN '652 enabled globally, which disables pre-fetching during index scans. This is usually a very bad idea.'
+											 WHEN [T].[TraceFlag] = '661'  THEN '661 enabled globally, which disables ghost record removal, causing the database to grow in size. This is usually a very bad idea.'
+										     WHEN [T].[TraceFlag] = '834'  AND @ColumnStoreIndexesInUse = 1 THEN '834 is enabled globally, but you also have columnstore indexes. That combination is not recommended by Microsoft.'
+											 WHEN [T].[TraceFlag] = '1117' THEN '1117 enabled globally, which grows all files in a filegroup at the same time.'
+											 WHEN [T].[TraceFlag] = '1118' THEN '1118 enabled globally, which tries to reduce SGAM waits.'
+											 WHEN [T].[TraceFlag] = '1211' THEN '1211 enabled globally, which disables lock escalation when you least expect it. This is usually a very bad idea.'
+											 WHEN [T].[TraceFlag] = '1222' THEN '1222 enabled globally, which captures deadlock graphs in the error log.'
+											 WHEN [T].[TraceFlag] = '1224' THEN '1224 enabled globally, which disables lock escalation until the server has memory pressure. This is usually a very bad idea.'
+											 WHEN [T].[TraceFlag] = '1806' THEN '1806 enabled globally, which disables Instant File Initialization, causing restores and file growths to take longer. This is usually a very bad idea.'
+											 WHEN [T].[TraceFlag] = '2330' THEN '2330 enabled globally, which disables missing index requests. This is usually a very bad idea.'
+											 WHEN [T].[TraceFlag] = '2371' THEN '2371 enabled globally, which changes the auto update stats threshold.'
+											 WHEN [T].[TraceFlag] = '3023' THEN '3023 enabled globally, which performs checksums by default when doing database backups.'
+											 WHEN [T].[TraceFlag] = '3226' THEN '3226 enabled globally, which keeps the event log clean by not reporting successful backups.'
+											 WHEN [T].[TraceFlag] = '3505' THEN '3505 enabled globally, which disables Checkpoints. This is usually a very bad idea.'
+											 WHEN [T].[TraceFlag] = '4199' THEN '4199 enabled globally, which enables non-default Query Optimizer fixes, changing query plans from the default behaviors.'
+											 WHEN [T].[TraceFlag] = '8048' THEN '8048 enabled globally, which tries to reduce CMEMTHREAD waits on servers with a lot of logical processors.'
+											 WHEN [T].[TraceFlag] = '8017' AND (CAST(SERVERPROPERTY('Edition') AS NVARCHAR(1000)) LIKE N'%Express%') THEN '8017 is enabled globally, but this is the default for Express Edition.'
+                                             WHEN [T].[TraceFlag] = '8017' AND (CAST(SERVERPROPERTY('Edition') AS NVARCHAR(1000)) NOT LIKE N'%Express%') THEN '8017 is enabled globally, which disables the creation of schedulers for all logical processors.'
+											 WHEN [T].[TraceFlag] = '8649' THEN '8649 enabled globally, which cost threshold for parallelism down to 0.  This is usually a very bad idea.'
 											 ELSE [T].[TraceFlag] + ' is enabled globally.' END
 										AS Details
 								FROM    #TraceStatus T;
